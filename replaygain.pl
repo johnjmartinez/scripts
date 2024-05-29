@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 
-# This script is meant to manage my FLAC music library, specifically the
+# This script is meant to manage a FLAC music library, specifically the
 # tags.
 
 # This script will:
@@ -12,7 +12,8 @@
 # * Remove ID3v2 tags while re-encoding, but keep VorbisComment tags
 # * Remove tags (only RATING as of right now)
 # * Add DISCNUMBER, ALBUMARTIST, TOTALTRACKS tags
-# * Remove leading 0s from TRACKNUMBER tags
+# * Remove leading 0s from the TRACKNUMBER, TOTALTRACKS, TRACKTOTAL,
+# DISCNUMBER, TOTALDISCS, DISCTOTAL tags
 # * Remove album art (right now that subroutine is disabled)
 # * Add ReplayGain tags for all albums, unless they already exist
 # * Sort tag fields alphabetically and uppercase them before writing
@@ -30,75 +31,75 @@
 # have the CUE file. I only keep my FLAC albums as separate files per
 # track. I just think it's good practice.
 
+# After running a FLAC library through this script, it will be easier to
+# match albums against the MusicBrainz database, in case you want to use
+# MusicBrainz Picard.
+
 use v5.34;
 use strict;
 use warnings;
+use diagnostics;
 use File::Copy qw(move);
 use File::Basename qw(basename dirname);
 use File::Path qw(make_path);
 use Cwd qw(abs_path);
 
-my(@flac_version, $library, %t, %files, @files, @dirs, %mflac_if, @mflac_of);
+my @required_tags = qw(artist album tracknumber title);
+my(%regex, %files, %tags_if, %tags_of, %tags_ref, @dirs, $library, $depth_og);
 
-# The 'version' subroutine checks the installed version of 'flac'.
-sub version {
-	my(@lines);
+$regex{fn} = qr/^(.*)\.([^.]*)$/;
+$regex{newline} = qr/(\r){0,}(\n){0,}$/;
+$regex{quote} = qr/^(\")|(\")$/;
+$regex{space} = qr/(^\s*)|(\s*$)/;
+$regex{zero} = qr/^0+([0-9]+)$/;
+$regex{tag} = qr/^([^=]+)=(.*)$/;
+$regex{fraction} = qr/^([0-9]+)\s*\/\s*([0-9]+)$/;
+$regex{disc} = qr/\s*[[:punct:]]?(cd|disc)\s*([0-9]+)(\s*of\s*([0-9]+))?[[:punct:]]?\s*$/i;
+$regex{id3v2} = qr/has an ID3v2 tag/;
 
-	open(my $flac_v, '-|', 'flac', '--version')
-	or die "Can't open 'flac': $!";
-	chomp(@lines = (<$flac_v>));
-	close($flac_v) or die "Can't close 'flac': $!";
+# Check if the necessary commands are installed to test FLAC files.
+chomp(my @flac_req = (`command -v flac metaflac`));
 
-	@flac_version = split(' ', $lines[0]);
+if (scalar(@flac_req) != 2) {
+	say "\n" . 'This script needs \'flac\' and \'metaflac\' installed!' . "\n";
+	exit;
 }
 
-version();
+# Check the installed version of 'flac'.
+my @flac_version = split(' ', `flac --version`);
 
-if (defined($ARGV[0])) {
-	if (scalar(@ARGV) != 1 or ! -d $ARGV[0]) { usage(); }
-	else { $library = abs_path($ARGV[0]); }
-} else { usage(); }
+if (scalar(@ARGV) != 1 or ! -d $ARGV[0]) { usage(); }
+
+$library = abs_path($ARGV[0]);
+$depth_og = scalar(split('/', $library));
 
 # Find all the sub-directories under the FLAC library directory.
-getdirs($library);
+get_dirs();
 
 # This is the main loop of the script, it calls most of the subroutines.
 foreach my $dn (@dirs) {
-	getfiles($dn);
-	my $fc = scalar(@files);
-	if ($fc > 0) {
-		for (my $n = 0; $n < $fc; $n++) {
-			my $fn = $files[$n];
-			undef(%t);
-			foreach my $tag (keys( %{ $files{$fn} } )) {
-				$t{$tag} = $files{$fn}{$tag}->[0];
-			}
-			existstag($fn, 'artist', 'album', 'title', 'tracknumber');
-			vendor($fn);
-			rmtag($fn, 'rating');
-			discnum($fn);
-			albumartist($fn);
-			tracknum($fn);
+	get_files($dn);
+
+	foreach my $fn (sort(keys(%{$files{flac}}))) {
+		mk_refs($fn);
+		vendor($fn);
+		rm_tag($fn, 'rating');
+		discnumber($fn, $dn);
+		albumartist($fn);
 # rm_albumart($fn);
-			writetags($fn);
-		}
+		changed($fn);
+		writetags($fn, 1);
 	}
 }
 
 # Running this loop after the first loop, because it renames the FLAC
 # files.
 foreach my $dn (@dirs) {
-	getfiles($dn);
-	my $fc = scalar(@files);
-	if ($fc > 0) {
-		for (my $n = 0; $n < $fc; $n++) {
-			my $fn = $files[$n];
-			undef(%t);
-			foreach my $tag (keys( %{ $files{$fn} } )) {
-				$t{$tag} = $files{$fn}{$tag}->[0];
-			}
-			tags2fn($fn);
-		}
+	get_files($dn);
+
+	foreach my $fn (sort(keys(%{$files{flac}}))) {
+		mk_refs($fn);
+		tags2fn($fn);
 	}
 }
 
@@ -109,26 +110,22 @@ rm_empty_dirs();
 # Find all the sub-directories under the FLAC library directory. We're
 # checking the sub-directories a second time, because they may have
 # changed due to the 'tags2fn' subroutine being run.
-getdirs($library);
+get_dirs();
 
 # Adding the TOTALTRACKS tag last, because we need to do that after the
 # files have been moved to the proper directories. The same rule applies
 # to the ReplayGain tags.
 foreach my $dn (@dirs) {
-	getfiles($dn);
-	my $fc = scalar(@files);
-	if ($fc > 0) {
-		replaygain($dn);
+	get_files($dn);
 
-		for (my $n = 0; $n < $fc; $n++) {
-			my $fn = $files[$n];
-			undef(%t);
-			foreach my $tag (keys( %{ $files{$fn} } )) {
-				$t{$tag} = $files{$fn}{$tag}->[0];
-			}
-			totaltracks($fn);
-			writetags($fn);
-		}
+	replaygain($dn);
+
+	foreach my $fn (sort(keys(%{$files{flac}}))) {
+		mk_refs($fn);
+		totaltracks($fn);
+		rm_zeropad($fn);
+		changed($fn);
+		writetags($fn, 1);
 	}
 }
 
@@ -148,99 +145,164 @@ sub or_warn {
 	if ($? != 0) { warn $msg; }
 }
 
-# The 'getdirs' subroutine finds all the sub-directories under the FLAC
-# library directory.
-sub getdirs {
-	my $dn = shift;
+# The 'get_dirs' subroutine finds all the sub-directories under the FLAC
+# library directory. The list of directories is sorted with the deepest
+# directories first.
+sub get_dirs {
+	my(@lines, @dirs_tmp, @path_parts, $depth_tmp, $depth_max);
+	$depth_max = 0;
 
 	undef(@dirs);
 
-	open(my $find, '-|', 'find', $dn, '-type', 'd', '-iname', '*')
-	or die "Can't open 'find': $!";
-	chomp(@dirs = (<$find>));
-	close($find) or die "Can't close 'find': $!";
-}
-
-# The 'getfiles' subroutine gets the list of FLAC files in the directory
-# passed to it.
-sub getfiles {
-	my $dn = shift;
-	my(@lines);
-
-	undef(%files);
-	undef(@files);
-	undef(%mflac_if);
-
-	open(my $find, '-|', 'find', $dn, '-mindepth', '1', '-maxdepth', '1', '-type', 'f', '-iname', '*')
+	open(my $find, '-|', 'find', $library, '-type', 'd', '-nowarn')
 	or die "Can't open 'find': $!";
 	chomp(@lines = (<$find>));
 	close($find) or die "Can't close 'find': $!";
 
 	foreach my $fn (@lines) {
-		if ($fn =~ m/.flac$/i) {
-			push(@files, $fn);
-			$files{$fn} = { gettags($fn) };
+		@path_parts = split('/', $fn);
+		$depth_tmp = scalar(@path_parts);
+
+		if ($depth_tmp > $depth_max) {
+			$depth_max = $depth_tmp;
+		}
+	}
+
+	for (my $i = $depth_max; $i > $depth_og; $i--) {
+		foreach my $fn (@lines) {
+			@path_parts = split('/', $fn);
+			$depth_tmp = scalar(@path_parts);
+
+			if ($depth_tmp == $i) {
+				push(@dirs_tmp, $fn);
+			}
+		}
+
+		push(@dirs, sort(@dirs_tmp));
+		undef(@dirs_tmp);
+	}
+
+	push(@dirs, $library);
+}
+
+# The 'get_files' subroutine gets a list of FLAC files in the directory
+# passed to it.
+sub get_files {
+	my $dn = shift;
+
+	my(@lines);
+
+	undef(%files);
+	undef(%tags_if);
+	undef(%tags_of);
+
+	open(my $find, '-|', 'find', $dn, '-mindepth', '1', '-maxdepth', '1', '-type', 'f', '-nowarn')
+	or die "Can't open 'find': $!";
+	chomp(@lines = (<$find>));
+	close($find) or die "Can't close 'find': $!";
+
+	while (my $fn = shift(@lines)) {
+		if ($fn =~ m/\.flac$/i) {
+			$files{flac}{$fn} = { gettags($fn) };
+		} else {
+			$files{other}{$fn} = ();
+		}
+	}
+
+	foreach my $fn (keys(%{$files{flac}})) {
+		my $tags_ref = \$files{flac}{$fn};
+
+		existstag($fn, $tags_ref, @required_tags);
+
+		foreach my $field (keys(%{$$tags_ref})) {
+			$tags_if{$fn}{$field} = $$tags_ref->{$field}[0];
+			$tags_of{$fn}{$field} = $$tags_ref->{$field}[0];
 		}
 	}
 }
 
-# The 'gettags' subroutine reads the tags from the FLAC file.
+# The 'gettags' subroutine reads the tags from a FLAC file.
 sub gettags {
 	my $fn = shift;
-	my(%alltags, @lines);
 
-	my $regex = qr/^(\")|(\")$/;
+	my(%alltags, @lines);
 
 	open(my $output, '-|', 'metaflac', '--no-utf8-convert', '--show-vendor-tag', '--export-tags-to=-', $fn)
 	or die "Can't open 'metaflac': $!";
 	chomp(@lines = (<$output>));
 	close($output) or die "Can't close 'metaflac': $!";
 
-	foreach (@lines) {
-		my(@tag, $tagname);
+	while (my $line = shift(@lines)) {
+		my(@tag, $field, $value);
 
-		if (/^reference/) {
-			@tag = split(' ');
-			$tagname = 'vendor_ref';
+		$line =~ s/$regex{quote}//g;
 
-			if (defined($tag[2])) { $tag[1] = $tag[2]; }
+		if ($line =~ m/^reference/) {
+			@tag = split(' ', $line);
+			$field = 'vendor_ref';
+
+			if (length($tag[2])) { $value = $tag[2]; }
 			else {
 				undef(@tag);
-				$tag[1] = $_;
+				$value = $line;
 			}
-		} else {
-			$_ =~ s/$regex//g;
-
-			push(@{$mflac_if{$fn}}, $_);
-			@tag = split('=');
-
-			if (! defined($tag[0] or ! defined($tag[1])) { next; }
-
-			$tagname = lc($tag[0]);
-			$tagname =~ s/[[:space:]]//g;
-			$tag[1] =~ s/(^\s*)|(\s*$)//g;
 		}
 
-		if (defined($tag[1])) { push(@{$alltags{$tagname}}, $tag[1]); }
+		if ($line =~ m/$regex{tag}/) {
+			$field = lc($1);
+			$value = $2;
+
+			$field =~ s/$regex{space}//g;
+			$value =~ s/$regex{space}//g;
+		}
+
+		if (! length($field) or ! length($value)) { next; }
+
+		push(@{$alltags{$field}}, $value);
 	}
 
 	return(%alltags);
 }
 
-# The 'existstag' subroutine checks for the existence of the chosen tags
-# passed to it. If it doesn't find the tag, it quits.
+# The 'existstag' subroutine checks for the existence of required tags.
+# If it doesn't find them, it quits.
 sub existstag {
 	my $fn = shift;
-	my $switch = 0;
+	my $tags_ref = shift;
 
-	foreach my $tag (@_) {
-		if (! defined($t{$tag})) {
-			say $fn . ': doesn\'t have ' . $tag . ' tag';
-			$switch = 1;
-		}
+	my(@missing_tags);
+
+	while (my $field = shift(@_)) {
+		if (length($$tags_ref->{$field}[0])) { next; }
+
+		push(@missing_tags, $field);
 	}
 
-	if ($switch == 1) { exit; }
+	if (! scalar(@missing_tags)) { return; }
+
+	foreach my $field (@missing_tags) {
+		say $fn . ': missing ' . $field . ' tag';
+	}
+
+	exit;
+}
+
+# The 'mk_refs' subroutine creates references for other subroutines to
+# have easier access to tags.
+sub mk_refs {
+	my $fn = shift;
+
+	$tags_ref{discnumber} = \$tags_of{$fn}{discnumber};
+	$tags_ref{totaldiscs} = \$tags_of{$fn}{totaldiscs};
+	$tags_ref{disctotal} = \$tags_of{$fn}{disctotal};
+	$tags_ref{tracknumber} = \$tags_of{$fn}{tracknumber};
+	$tags_ref{totaltracks} = \$tags_of{$fn}{totaltracks};
+	$tags_ref{tracktotal} = \$tags_of{$fn}{tracktotal};
+	$tags_ref{artist} = \$tags_of{$fn}{artist};
+	$tags_ref{albumartist} = \$tags_of{$fn}{albumartist};
+	$tags_ref{album} = \$tags_of{$fn}{album};
+	$tags_ref{title} = \$tags_of{$fn}{title};
+	$tags_ref{vendor} = \$tags_of{$fn}{vendor_ref};
 }
 
 # The 'vendor' subroutine re-encodes the FLAC file, if it was encoded
@@ -248,196 +310,170 @@ sub existstag {
 # removed in the process of decoding the FLAC to WAV, before re-encoding
 # it.
 sub vendor {
-	my $fn = shift;
-	my($newfn, $newfn_flac, $newfn_wav, $newfn_stderr, $newfn_art);
+	my $if = shift;
+
+	my($of, $of_flac, $of_wav, $of_art, $of_stderr, $has_id3v2);
+	$has_id3v2 = 0;
 
 	sub sigint {
 		say "Interrupted by user!";
 
-		foreach my $fn (@_) {
-			if (-f $fn) {
-				unlink($fn) or die "Can't remove '$fn': $!";
-			}
+		while (my $fn = shift(@_)) {
+			if (! -f $fn) { next; }
+
+			unlink($fn) or die "Can't remove '$fn': $!";
 		}
 
 		exit;
 	}
 
-	unless (! defined($t{vendor_ref}) or $t{vendor_ref} ne $flac_version[1]) {
-		return();
+	unless (! length(${$tags_ref{vendor}}) or ${$tags_ref{vendor}} ne $flac_version[1]) {
+		return;
 	}
 
-	$newfn = $fn;
-	$newfn =~ s/\.[^.]*$//;
-	$newfn = $newfn . '-' . int(rand(10000));
-	$newfn_flac = $newfn . '.flac';
-	$newfn_wav = $newfn . '.wav';
-	$newfn_art = $newfn . '.albumart';
-	$newfn_stderr = $newfn . '.stderr';
+	$of = $if;
+	$of =~ m/$regex{fn}/;
+	$of = $1;
+	$of = $of . '-' . int(rand(10000));
 
-	print $fn . ': ' . 'old encoder (' . $t{vendor_ref} . '), re-encoding... ';
+	$of_flac = $of . '.flac';
+	$of_wav = $of . '.wav';
+	$of_art = $of . '.albumart';
+	$of_stderr = $of . '.stderr';
+
+	print $if . ': old encoder (' . ${$tags_ref{vendor}} . '), re-encoding... ';
 
 # Duplicate STDERR (for restoration later).
-# Redirect STDERR to a file ($newfn_stderr).
-	open(my $olderr, ">&STDERR") or die "Can't dup STDERR: $!";
+# Redirect STDERR to a file ($of_stderr).
+	open(my $stderr_dup, ">&STDERR") or die "Can't dup STDERR: $!";
 	close(STDERR) or die "Can't close STDERR: $!";
-	open(STDERR, '>', $newfn_stderr) or die "Can't open '$newfn_stderr': $!";
+	open(STDERR, '>', $of_stderr) or die "Can't open '$of_stderr': $!";
 
-	system('flac', '--silent', '-8', $fn, "--output-name=$newfn_flac");
+	system('flac', '--silent', '-8', $if, "--output-name=$of_flac");
 	or_warn("Can't encode file");
 
-# Close the STDERR file ($newfn_stderr).
-# Restore STDERR from $olderr.
-# Close the $olderr filehandle.
-	close(STDERR) or die;
-	open(STDERR, ">&", $olderr) or die "Can't dup STDERR: $!";
-	close($olderr) or die "Can't close STDERR: $!";
+# Close the STDERR file ($of_stderr).
+# Restore STDERR from $stderr_dup.
+# Close the $stderr_dup filehandle.
+	close(STDERR) or die "Can't close STDERR: $!";
+	open(STDERR, ">&", $stderr_dup) or die "Can't dup STDERR: $!";
+	close($stderr_dup) or die "Can't close STDERR: $!";
 
-	given ($?) {
-		when (0) {
-			move($newfn_flac, $fn) or die "Can't rename '$newfn_flac': $!";
-			say 'done';
+	if ($? == 0) {
+		move($of_flac, $if) or die "Can't rename '$of_flac': $!";
+		say 'done';
+	} elsif ($? == 2) {
+		sigint($of_flac, $of_stderr);
+	} else {
+# Open a filehandle that reads from the STDERR file ($of_stderr).
+# Checks if FLAC file has ID3v2 tags.
+		open(my $stderr_fh, '<', $of_stderr)
+		or die "Can't open '$of_stderr': $!";
+		while (chomp(my $line = <$stderr_fh>)) {
+			if ($line =~ m/$regex{id3v2}/) {
+				$has_id3v2 = 1;
+				last;
+			}
 		}
-		when (2) {
-			sigint($newfn_flac, $newfn_stderr);
-		}
-		default {
-# Open a filehandle that reads from the STDERR file ($newfn_stderr).
-# Save the content of the file in an array (@stderra).
-			open(my $fh_stderrf, '<', $newfn_stderr)
-			or die "Can't open '$newfn_stderr': $!";
-			chomp(my @stderra = (<$fh_stderrf>));
-			close($fh_stderrf) or die "Can't close '$newfn_stderr': $!";
+		close($stderr_fh) or die "Can't close '$of_stderr': $!";
 
-			foreach (@stderra) {
-				if (/has an ID3v2 tag/) {
-					print "\n" . $fn . ': ' . 'replacing ID3v2 tags with VorbisComment... ';
+		if (! $has_id3v2) { last; }
+
+		print "\n" . $if . ': ' . 'replacing ID3v2 tags with VorbisComment... ';
 
 # Decode the FLAC file to WAV (in order to lose the ID3v2 tags).
-					system('flac', '--silent', '--decode', $fn, "--output-name=$newfn_wav");
-					or_warn("Can't decode file");
+		system('flac', '--silent', '--decode', $if, "--output-name=$of_wav");
+		or_warn("Can't decode file");
 
-					if ($? == 2) { sigint($newfn_wav, $newfn_stderr); }
+		if ($? == 2) { sigint($of_wav, $of_stderr); }
 
 # Back up the album art, if it exists.
-					system("metaflac --export-picture-to=\"$newfn_art\" \"$fn\" 1>&- 2>&-");
+		system("metaflac --export-picture-to=\"$of_art\" \"$if\" 1>&- 2>&-");
 
 # Encode the WAV file to FLAC.
-					if (-f $newfn_art) {
-						system('flac', '--silent', '-8', "--picture=$newfn_art", $newfn_wav, "--output-name=$newfn_flac");
-						or_warn("Can't encode file");
+		if (-f $of_art) {
+			system('flac', '--silent', '-8', "--picture=$of_art", $of_wav, "--output-name=$of_flac");
+			or_warn("Can't encode file");
 
-						unlink($newfn_art)
-						or die "Can't remove '$newfn_art': $!";
-					} else {
-						system('flac', '--silent', '-8', $newfn_wav, "--output-name=$newfn_flac");
-						or_warn("Can't encode file");
-					}
+			unlink($of_art)
+			or die "Can't remove '$of_art': $!";
+		} else {
+			system('flac', '--silent', '-8', $of_wav, "--output-name=$of_flac");
+			or_warn("Can't encode file");
+		}
 
-					unlink($newfn_wav)
-					or die "Can't remove '$newfn_wav': $!";
+		unlink($of_wav)
+		or die "Can't remove '$of_wav': $!";
 
-					if ($? == 0) {
-						move($newfn_flac, $fn)
-						or die "Can't move '$newfn_flac': $!";
-						say 'done';
+		if ($? == 0) {
+			move($of_flac, $if)
+			or die "Can't move '$of_flac': $!";
+			say 'done';
 
-# Clearing the %mflac_if hash key representing $fn, to force the
-# 'writetags' subroutine to rewrite the tags. They were removed in the
-# decoding process.
-						@{$mflac_if{$fn}} = ();
-					} elsif ($? == 2) {
-						sigint($newfn_wav, $newfn_flac, $newfn_stderr);
-					}
-				}
-			}
+# Rewrite the tags. They were removed in the decoding process.
+			writetags($if, 0);
+		} elsif ($? == 2) {
+			sigint($of_wav, $of_flac, $of_stderr);
 		}
 	}
 
 # Delete the STDERR file.
-	unlink($newfn_stderr) or die "Can't remove '$newfn_stderr': $!";
+	unlink($of_stderr) or die "Can't remove '$of_stderr': $!";
 }
 
-# The 'rmtag' subroutine removes tags of choice.
-sub rmtag {
+# The 'rm_tag' subroutine removes tags of choice.
+sub rm_tag {
 	my $fn = shift;
 
-	foreach my $tag (@_) {
-		if (defined($t{$tag})) {
-			say $fn . ': removing ' . $tag . ' tag';
-			delete($t{$tag});
-		}
+	while (my $field = shift(@_)) {
+		if (! length($tags_of{$fn}{$field})) { next; }
+
+		delete($tags_of{$fn}{$field});
 	}
 }
 
-# The 'discnum' subroutine creates the DISCNUMBER tag, if it doesn't
-# exist already. This subroutine needs to be run before 'albumartist',
-# and 'totaltracks'.
-sub discnum {
+# The 'discnumber' subroutine creates the DISCNUMBER tag, if it doesn't
+# exist already. DISCTOTAL is also added, if possible. This subroutine
+# needs to be run before 'albumartist', and 'totaltracks'.
+sub discnumber {
 	my $fn = shift;
+	my $dn = shift;
 
-	my $dn = dirname($fn);
-	my $regex = qr/\s*[[:punct:]]?(cd|disc)\s*([0-9]+)(\s*of\s*([0-9]+))?[[:punct:]]?\s*$/i;
-	my $regex2= qr/0+([0-9]+)/;
+	if (length(${$tags_ref{discnumber}})) {
+		if (${$tags_ref{discnumber}} =~ m/$regex{fraction}/) {
+			${$tags_ref{discnumber}} = $1;
 
-# Adding the DISCNUMBER tag.
-	if (! defined($t{discnumber})) {
-		if ($t{album} =~ m/$regex/) {
-			$t{discnumber} = $2;
-
-			if (! defined($t{totaldiscs}) and defined($4)) {
-				$t{totaldiscs} = $4;
-
-				say $fn . ': adding totaldiscs tag';
+			if (! length(${$tags_ref{totaldiscs}})) {
+				${$tags_ref{totaldiscs}} = $2;
 			}
-
-			$t{album} =~ s/$regex//;
-
-			say $fn . ': adding discnumber tag';
 		}
 	}
 
-	if (! defined($t{discnumber})) {
-		if ($dn =~ m/$regex/) {
-			$t{discnumber} = $2;
+	if (! length(${$tags_ref{discnumber}})) {
+		if (${$tags_ref{album}} =~ m/$regex{disc}/) {
+			${$tags_ref{discnumber}} = $2;
 
-			if (! defined($t{totaldiscs}) and defined($4)) {
-				$t{totaldiscs} = $4;
-
-				say $fn . ': adding totaldiscs tag';
+			if (! length(${$tags_ref{totaldiscs}}) and length($4)) {
+				${$tags_ref{totaldiscs}} = $4;
 			}
-		} else { $t{discnumber} = 1; }
 
-		say $fn . ': adding discnumber tag';
-	}
-
-# Let's add the TOTALDISCS tag as well, if possible.
-	if (! defined($t{totaldiscs})) {
-		if (defined($t{disctotal})) {
-			$t{totaldiscs} = $t{disctotal};
-
-			say $fn . ': adding totaldiscs tag';
+			${$tags_ref{album}} =~ s/$regex{disc}//;
 		}
 	}
 
-# Cleaning up DISCNUMBER, TOTALDISCS and DISCTOTAL tags, if they exist.
-	if (defined($t{discnumber})) {
-		$t{discnumber} =~ s/$regex2/$1/;
+	if (! length(${$tags_ref{discnumber}})) {
+		if ($dn =~ m/$regex{disc}/) {
+			${$tags_ref{discnumber}} = $2;
+
+			if (! length(${$tags_ref{totaldiscs}}) and length($4)) {
+				${$tags_ref{totaldiscs}} = $4;
+			}
+		} else { ${$tags_ref{discnumber}} = 1; }
 	}
 
-	if (defined($t{totaldiscs})) {
-		$t{totaldiscs} =~ s/$regex2/$1/;
-	}
-
-	if (defined($t{disctotal})) {
-		$t{disctotal} =~ s/$regex2/$1/;
-	}
-
-	if (defined($t{discnumber})) {
-		if (! defined($files{$fn}{discnumber}->[0])) {
-			$files{$fn}{discnumber}->[0] = $t{discnumber};
-		} elsif ($files{$fn}{discnumber}->[0] ne $t{discnumber}) {
-			$files{$fn}{discnumber}->[0] = $t{discnumber};
+	if (! length(${$tags_ref{totaldiscs}})) {
+		if (length(${$tags_ref{disctotal}})) {
+			${$tags_ref{totaldiscs}} = ${$tags_ref{disctotal}};
 		}
 	}
 }
@@ -447,48 +483,34 @@ sub discnum {
 sub albumartist {
 	my $fn = shift;
 
-	my($tracks, %tracks);
+	my(%tracks, $tracks);
 
-	if (defined($t{discnumber})) {
-		foreach my $fn (@files) {
-			if (defined($files{$fn}{discnumber}->[0])) {
-				${tracks}{$files{$fn}{discnumber}->[0]}++;
+	if (length(${$tags_ref{discnumber}})) {
+		foreach my $fn (keys(%tags_of)) {
+			$tags_ref{tmp} = \$tags_of{$fn}{discnumber};
+
+			if (length(${$tags_ref{tmp}})) {
+				${tracks}{${$tags_ref{tmp}}}++;
 			}
 		}
 
-		$tracks = ${tracks}{$t{discnumber}};
+		$tracks = ${tracks}{${$tags_ref{discnumber}}};
 
-		if (! defined($t{albumartist})) {
+		if (! length(${$tags_ref{albumartist}})) {
 			my(%artist, $max);
 
-			if ($tracks == 1) { $max = $tracks; } else { $max = $tracks / 2; }
+			if ($tracks == 1) { $max = $tracks; }
+			else { $max = $tracks / 2; }
 
-			foreach my $fn (keys(%files)) {
-				$artist{$files{$fn}{artist}->[0]} = 1;
+			foreach my $fn (keys(%tags_of)) {
+				$tags_ref{tmp} = \$tags_of{$fn}{artist};
+
+				$artist{${$tags_ref{tmp}}} = 1;
 			}
 
 			if (keys(%artist) > $max) {
-				$t{albumartist} = 'Various Artists';
-			} else { $t{albumartist} = $t{artist}; }
-
-			say $fn . ': adding albumartist tag';
-		}
-	}
-}
-
-# The 'tracknum' subroutine removes leading 0s from the TRACKNUMBER tag.
-sub tracknum {
-	my $fn = shift;
-
-	my $regex= qr/0+([0-9]+)/;
-
-	if (defined($t{tracknumber})) {
-		my $old_tag = $t{tracknumber};
-
-		$t{tracknumber} =~ s/$regex/$1/;
-
-		if ($t{tracknumber} ne $old_tag) {
-			say $fn . ': fixing tracknumber tag';
+				${$tags_ref{albumartist}} = 'Various Artists';
+			} else { ${$tags_ref{albumartist}} = ${$tags_ref{artist}}; }
 		}
 	}
 }
@@ -498,36 +520,118 @@ sub tracknum {
 sub rm_albumart {
 	my $fn = shift;
 
-	say $fn . ': removing album art';
-
 	system('metaflac', '--remove', ,'--block-type=PICTURE', $fn);
 	or_warn("Can't remove album art");
+
+	say $fn . ': removed album art';
+}
+
+# The 'changed' subroutine will print any changes that have been made to
+# the tags, by the other subroutines.
+sub changed {
+	my $fn = shift;
+
+	my(%fields);
+
+# Collect all the tag fields from the input tags.
+	foreach my $field (keys(%{$tags_if{$fn}})) {
+		$fields{$field} = 1;
+	}
+
+# Collect all the tag fields from the output tags. If there's tag fields
+# with empty values, ignore those hash elements. They get
+# unintentionally created, when using references in other subroutines.
+	foreach my $field (keys(%{$tags_of{$fn}})) {
+		$tags_ref{tmp} = \$tags_of{$fn}{$field};
+
+		if (! length(${$tags_ref{tmp}})) { next; }
+
+		$fields{$field} = 1;
+	}
+
+	foreach my $field (sort(keys(%fields))) {
+		my $tag_if_ref = \$tags_if{$fn}{$field};
+		my $tag_of_ref = \$tags_of{$fn}{$field};
+
+		if (! length($$tag_if_ref)) {
+			say $fn . ': added ' . $field . ' tag';
+			next;
+		}
+
+		if (! length($$tag_of_ref)) {
+			say $fn . ': removed ' . $field . ' tag';
+			next;
+		}
+
+		if ($$tag_if_ref ne $$tag_of_ref) {
+			say $fn . ': fixed ' . $field . ' tag';
+			next;
+		}
+	}
+}
+
+# The 'rm_zeropad' subroutine removes leading 0s from the TRACKNUMBER,
+# TOTALTRACKS, TRACKTOTAL, DISCNUMBER, TOTALDISCS, DISCTOTAL tags. This
+# subroutine needs to be run after 'discnumber' and 'totaltracks'.
+sub rm_zeropad {
+	my $fn = shift;
+
+	if (length(${$tags_ref{tracknumber}})) {
+		${$tags_ref{tracknumber}} =~ s/$regex{zero}/$1/;
+	}
+
+	if (length(${$tags_ref{totaltracks}})) {
+		${$tags_ref{totaltracks}} =~ s/$regex{zero}/$1/;
+	}
+
+	if (length(${$tags_ref{tracktotal}})) {
+		${$tags_ref{tracktotal}} =~ s/$regex{zero}/$1/;
+	}
+
+	if (length(${$tags_ref{discnumber}})) {
+		${$tags_ref{discnumber}} =~ s/$regex{zero}/$1/;
+	}
+
+	if (length(${$tags_ref{totaldiscs}})) {
+		${$tags_ref{totaldiscs}} =~ s/$regex{zero}/$1/;
+	}
+
+	if (length(${$tags_ref{disctotal}})) {
+		${$tags_ref{disctotal}} =~ s/$regex{zero}/$1/;
+	}
 }
 
 # The 'replaygain' subroutine adds ReplayGain tags, if they don't exist
 # already.
 sub replaygain {
 	my $dn = shift;
+
 	my(%replaygain);
 
-	foreach my $fn (sort(keys %files)) {
-		if (defined($files{$fn}{replaygain_album_gain}->[0])) {
-			$replaygain{$files{$fn}{replaygain_album_gain}->[0]}++;
+	if (! keys(%{$files{flac}})) {
+		return;
+	}
+
+	foreach my $fn (keys(%tags_of)) {
+		$tags_ref{tmp} = \$tags_of{$fn}{replaygain_album_gain};
+
+		if (length(${$tags_ref{tmp}})) {
+			$replaygain{${$tags_ref{tmp}}}++;
 		}
 	}
 
-	if (keys(%replaygain) != 1) {
-		print "$dn: adding ReplayGain... ";
+	if (! keys(%replaygain)) {
+		print $dn . ': adding ReplayGain... ';
 
-		system('metaflac', '--remove-replay-gain', keys(%files));
+		system('metaflac', '--remove-replay-gain', keys(%{$files{flac}}));
 		or_warn("Can't remove ReplayGain");
-		system('metaflac', '--add-replay-gain', keys(%files));
+		system('metaflac', '--add-replay-gain', keys(%{$files{flac}}));
 		or_warn("Can't add ReplayGain");
 
 		if ($? == 0) {
 			say 'done';
 
-			getfiles($dn);
+			get_files($dn);
 		}
 	}
 }
@@ -536,25 +640,43 @@ sub replaygain {
 # uppercases the field names. Then it writes the tags to the FLAC file.
 sub writetags {
 	my $fn = shift;
-	my $is_equal = 1;
+	my $is_equal = shift;
 
-	undef(@mflac_of);
+	my $tags_if_ref = \$files{flac}{$fn};
+	my $tags_of_ref = \$tags_of{$fn};
 
-# Sort the keys in the hash that contains all the tags.
-# Then push the tags to the @mflac_of array.
-	foreach my $tag (sort(keys(%t))) {
-		unless ($tag eq 'vendor_ref') {
-			if (defined($t{$tag})) {
-				push(@mflac_of, uc($tag) . '=' . $t{$tag});
+	my(@mflac_if, @mflac_of);
+
+# Push the input tags to the @mflac_if array.
+	foreach my $field (sort(keys(%{$$tags_if_ref}))) {
+		for (my $i = 0; $i < scalar(@{$$tags_if_ref->{$field}}); $i++) {
+			$tags_ref{tmp} = \$$tags_if_ref->{$field}[$i];
+
+			unless ($field eq 'vendor_ref') {
+				push(@mflac_if, uc($field) . '=' . ${$tags_ref{tmp}});
 			}
 		}
 	}
 
-	if (scalar(@{$mflac_if{$fn}}) != scalar(@mflac_of)) {
+# Push the output tags to the @mflac_of array. If there's tag fields
+# with empty values, ignore those hash elements. They get
+# unintentionally created, when using references in other subroutines.
+	foreach my $field (sort(keys(%{$$tags_of_ref}))) {
+		$tags_ref{tmp} = \$$tags_of_ref->{$field};
+
+		if (! length(${$tags_ref{tmp}})) { next; }
+
+		unless ($field eq 'vendor_ref') {
+			push(@mflac_of, uc($field) . '=' . ${$tags_ref{tmp}});
+		}
+	}
+
+# Check if there's a difference between the input and output tags.
+	if (scalar(@mflac_if) != scalar(@mflac_of)) {
 		$is_equal = 0;
 	} else {
-		for (my $i = 0; $i < scalar(@{$mflac_if{$fn}}); $i++) {
-			if ($mflac_if{$fn}->[$i] ne $mflac_of[$i]) {
+		for (my $i = 0; $i < scalar(@mflac_if); $i++) {
+			if ($mflac_if[$i] ne $mflac_of[$i]) {
 				$is_equal = 0;
 				last;
 			}
@@ -565,18 +687,20 @@ sub writetags {
 # Import the tags from the @mflac_of array.
 		system('metaflac', '--remove-all-tags', $fn);
 		or_warn("Can't remove tags");
-		open(my $output, '|-', 'metaflac', '--import-tags-from=-', $fn)
+		open(my $input, '|-', 'metaflac', '--import-tags-from=-', $fn)
 		or die "Can't import tags: $!";
-		foreach my $line (@mflac_of) { say $output $line; }
-		close($output) or die "Can't close 'metaflac': $!";
+		while (my $line = shift(@mflac_of)) { say $input $line; }
+		close($input) or die "Can't close 'metaflac': $!";
 	}
 }
 
 # The 'tags2fn' subroutine creates a new path and file name for the
 # input files, based on the changes that have been made to the tags.
 sub tags2fn {
-	my $fn = shift;
-	my $dn = dirname($fn);
+	my $if = shift;
+
+	my($of_dn, $of_bn, $of);
+	my($discnumber, $tracknumber, $albumartist, $album, $title);
 
 	sub rm_special_chars {
 		my $string = shift;
@@ -585,27 +709,53 @@ sub tags2fn {
 		return($string);
 	}
 
-	my $discnum = $t{discnumber};
-	my $albumartist = rm_special_chars($t{albumartist});
-	$albumartist =~ s/ +/ /g;
-	$albumartist =~ s/^\.+//g;
-	my $album = rm_special_chars($t{album});
-	$album =~ s/ +/ /g;
-	$album =~ s/^\.+//g;
-	my $tracknum = sprintf("%02d", $t{tracknumber});
-	my $title = rm_special_chars($t{title});
-	$title =~ s/ +/ /g;
-	my $newfn_bn = $discnum . '-' . $tracknum . '. ' . $title . '.flac';
-	my $newdn_dn = $library . '/' . $albumartist . '/' . $album;
-	my $newfn = $newdn_dn . '/' . $newfn_bn;
+	$discnumber = ${$tags_ref{discnumber}};
+	$tracknumber = ${$tags_ref{tracknumber}};
 
-	if (! -d $newdn_dn) {
-		make_path($newdn_dn) or die "Can't create directory: $!";
+	if ($discnumber =~ m/$regex{fraction}/) {
+		$discnumber = $1;
 	}
 
-	if (! -f $newfn) {
-		say $fn . ': renaming based on tags';
-		move($fn, $newfn) or die "Can't rename '$fn': $!";
+	if ($tracknumber =~ m/$regex{fraction}/) {
+		$tracknumber = $1;
+	}
+
+	$tracknumber = sprintf('%02d', $tracknumber);
+
+	$albumartist = rm_special_chars(${$tags_ref{albumartist}});
+	$albumartist =~ s/ +/ /g;
+	$albumartist =~ s/^\.+//g;
+	$album = rm_special_chars(${$tags_ref{album}});
+	$album =~ s/ +/ /g;
+	$album =~ s/^\.+//g;
+	$title = rm_special_chars(${$tags_ref{title}});
+	$title =~ s/ +/ /g;
+
+	$of_dn = $library . '/' . $albumartist . '/' . $album;
+	$of_bn = $discnumber . '-' . $tracknumber . '. ' . $title . '.flac';
+	$of = $of_dn . '/' . $of_bn;
+
+	if (! -d $of_dn) {
+		make_path($of_dn) or die "Can't create directory: $!";
+	}
+
+	if (! -f $of) {
+		move($if, $of) or die "Can't rename '$if': $!";
+		say $if . ': renamed based on tags';
+	}
+
+# If the input directory contains other filetypes besides FLAC, move
+# those files to the new directory. This may include log files, etc.
+	if (length($files{other})) {
+		foreach my $if (keys(%{$files{other}})) {
+			$of = $of_dn . '/' . basename($if);
+
+			if (! -f $of) {
+				move($if, $of) or die "Can't rename '$if': $!";
+			}
+		}
+
+		delete($files{other});
 	}
 }
 
@@ -614,26 +764,34 @@ sub tags2fn {
 sub totaltracks {
 	my $fn = shift;
 
-	my($tracks, %tracks);
+	my(%tracks, $tracks);
 
-	if (defined($t{discnumber})) {
-		foreach (@files) {
-			if (defined($files{$_}{discnumber}->[0])) {
-				${tracks}{$files{$_}{discnumber}->[0]}++;
-			}
-		}
+	if (${$tags_ref{tracknumber}} =~ m/$regex{fraction}/) {
+		${$tags_ref{tracknumber}} = $1;
 
-		$tracks = ${tracks}{$t{discnumber}};
-
-		if (! defined($t{totaltracks}) and ! defined($t{tracktotal})) {
-			say $fn . ': adding totaltracks tag';
-			$t{totaltracks} = $tracks;
+		if (! length(${$tags_ref{totaltracks}})) {
+			${$tags_ref{totaltracks}} = $2;
 		}
 	}
 
-	if (defined($t{tracktotal}) and ! defined($t{totaltracks})) {
-		say $fn . ': adding totaltracks tag';
-		$t{totaltracks} = $t{tracktotal};
+	if (length(${$tags_ref{discnumber}})) {
+		foreach my $fn (keys(%tags_of)) {
+			$tags_ref{tmp} = \$tags_of{$fn}{discnumber};
+
+			if (length(${$tags_ref{tmp}})) {
+				${tracks}{${$tags_ref{tmp}}}++;
+			}
+		}
+
+		$tracks = ${tracks}{${$tags_ref{discnumber}}};
+
+		if (! length(${$tags_ref{totaltracks}}) and ! length(${$tags_ref{tracktotal}})) {
+			${$tags_ref{totaltracks}} = $tracks;
+		}
+	}
+
+	if (length(${$tags_ref{tracktotal}}) and ! length(${$tags_ref{totaltracks}})) {
+		${$tags_ref{totaltracks}} = ${$tags_ref{tracktotal}};
 	}
 }
 
@@ -641,7 +799,7 @@ sub totaltracks {
 # under the FLAC library directory, and removes them.
 sub rm_empty_dirs {
 	sub read_find {
-		open(my $find, '-|', 'find', $library, ,'-mindepth', '1', '-type', 'd', '-empty')
+		open(my $find, '-|', 'find', $library, ,'-mindepth', '1', '-type', 'd', '-empty', '-nowarn')
 		or die "Can't open 'find': $!";
 		chomp(my @lines = (<$find>));
 		close($find) or die "Can't close 'find': $!";

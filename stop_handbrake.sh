@@ -1,31 +1,46 @@
 #!/bin/bash
-# This script finds a running HandBrake process, if it exists, and
-# pauses it. The user can resume the process later with the
+
+# This script finds running HandBrakeCLI processes, if they exist, and
+# pauses them. The user can resume them later with the
 # 'start_handbrake.sh' script.
 
 # The script uses the SIGSTP (20) signal to suspend the process.
 # To get a list of available signals: kill -l
 
-pid_list_f='/dev/shm/handbrake_pid.txt'
-touch "$pid_list_f"
+declare comm pid args state
+declare -a hb_pids
+declare -A regex
 
 comm='HandBrakeCLI'
 
-mapfile -t pids < <(ps -C "$comm" -o comm,pid | tail -n +2)
+regex[pid_comm]='^[[:blank:]]*([0-9]+)[[:blank:]]*(.*)$'
 
-for (( i = 0; i < ${#pids[@]}; i++ )); do
-	mapfile -d' ' -t pid_info < <(sed -E 's/ +/ /' <<<"${pids[${i}]}")
-	name=$(tr -d '[:blank:]' <<<"${pid_info[0]}")
-	pid=$(tr -d '[:blank:]' <<<"${pid_info[1]}")
+mapfile -t hb_pids < <(ps -C "$comm" -o pid=,args=)
 
-	if [[ $name == $comm ]]; then
-		printf '\n%s\n' 'STOPPING!'
-		printf '%s\n' "NAME: ${name} : PID: ${pid}"
-		kill -s 20 "${pid}"
-
-		printf '%s\n' "$pid" >> "$pid_list_f"
-
-		printf '\n%s\n' 'Run this command later to resume:'
-		printf '%s\n\n' 'start_handbrake.sh'
+for (( i = 0; i < ${#hb_pids[@]}; i++ )); do
+	if [[ ! ${hb_pids[${i}]} =~ ${regex[pid_comm]} ]]; then
+		continue
 	fi
+
+	pid="${BASH_REMATCH[1]}"
+	args="${BASH_REMATCH[2]}"
+
+	state=$(ps -p "$pid" -o state=)
+
+	if [[ $state == 'T' ]]; then
+		continue
+	fi
+
+	cat <<INFO
+
+STOPPING!
+PID: ${pid}
+COMMAND: ${args}
+
+Run this command later to resume:
+start_handbrake.sh
+
+INFO
+
+	kill -s 20 "$pid"
 done

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # This script slowly and gradually lowers the volume until it's equal to
-# 0%. Although, any target volume can be set using the $target_volume
+# 0%. Although, any target volume can be set using the $volume[target]
 # variable. The script takes 1 hour (360 * 10 seconds) all in all, to
 # completely lower the volume to the target volume.
 
@@ -10,86 +10,85 @@
 
 # https://gitlab.freedesktop.org/pipewire/pipewire/-/wikis/Migrate-PulseAudio
 
+declare cfg_fn pw_id interval unit spin_pid n
+declare -a count
+declare -A regex volume
+
+regex[blank1]='^[[:blank:]]*(.*)[[:blank:]]*$'
+regex[blank2]='[[:blank:]]+'
+regex[id]='^id ([0-9]+),'
+regex[node]='^node\.description = \"(.*)\"'
+regex[class]='^media\.class = \"(.*)\"'
+regex[sink]='^Audio\/Sink$'
+regex[volume]='^\"channelVolumes\": \[ ([0-9]+\.[0-9]+), [0-9]+\.[0-9]+ \],'
+regex[zero]='^0+([0-9]+)$'
+regex[split]='^([0-9]+)([0-9]{6})$'
+regex[cfg_node]='^node = (.*)$'
+
+volume[full]=1000000
+volume[no]=0
+volume[target]=0
+
 cfg_fn="${HOME}/lower_volume_pw.cfg"
 
-regex_id='^id ([0-9]+),'
-regex_node='^node\.description = \"(.*)\"'
-regex_class='^media\.class = \"(.*)\"'
-regex_sink='^Audio/Sink$'
-regex_volume='^\"channelVolumes\": \[ ([0-9]+\.[0-9]+), [0-9]+\.[0-9]+ \],'
-regex_zero='^0+([0-9]+)$'
-regex_split='^([0-9]+)([0-9]{6})$'
-full_volume=1000000
-no_volume=0
-target_volume=0
 interval=10
+unit=354
 
-declare pw_id
+count=(0 0 0)
 
-# trap ctrl-c and call ctrl_c()
-trap ctrl_c INT
-
-# If a SIGINT signal is captured, then put the volume back to where it
-# was before running this script.
-ctrl_c () {
-	if [[ -n $pw_id ]]; then
-		set_volume "$volume_og" 'false'
-	fi
-
-	printf '%s\n' '** Trapped CTRL-C'
-
-	exit
-}
-
-# Creates a function called 'get_id', which decides the audio output to
+# Creates a function, called 'get_id', which decides the audio output to
 # use, based on user selection or the existence of a configuration file.
 get_id () {
+	declare pw_node pw_node_tmp n line
+	declare -a pw_info lines
 	declare -A pw_parsed nodes
 
-	regex_cfg_node='^node = (.*)$'
-
 	match_node () {
+		declare pw_id_tmp
+
 		for pw_id_tmp in "${!nodes[@]}"; do
 			pw_node_tmp="${nodes[${pw_id_tmp}]}"
 
-			if [[ $pw_node_tmp == "$pw_node" ]]; then
-				pw_id="$pw_id_tmp"
-
-				break
+			if [[ $pw_node_tmp != "$pw_node" ]]; then
+				continue
 			fi
+
+			pw_id="$pw_id_tmp"
+
+			break
 		done
 	}
 
-	declare n
-
-	mapfile -t pw_info < <(pw-cli ls Node | sed -E -e 's/^[[:blank:]]*//' -e 's/[[:space:]]+/ /g')
+	mapfile -t pw_info < <(pw-cli ls Node | sed -E -e "s/${regex[blank1]}/\1/" -e "s/${regex[blank2]}/ /g")
 
 # Parse the output from 'pw-cli'...
 	for (( i = 0; i < ${#pw_info[@]}; i++ )); do
 		line="${pw_info[${i}]}"
-		
-		if [[ $line =~ $regex_id ]]; then
+
+		if [[ $line =~ ${regex[id]} ]]; then
 			if [[ -z $n ]]; then
 				n=0
 			else
-				n=$(( n + 1 ))
+				(( n += 1 ))
 			fi
 
 			pw_parsed["${n},id"]="${BASH_REMATCH[1]}"
 		fi
 
-		if [[ $line =~ $regex_node ]]; then
+		if [[ $line =~ ${regex[node]} ]]; then
 			pw_parsed["${n},node"]="${BASH_REMATCH[1]}"
 		fi
 
-		if [[ $line =~ $regex_class ]]; then
+		if [[ $line =~ ${regex[class]} ]]; then
 			pw_parsed["${n},class"]="${BASH_REMATCH[1]}"
 		fi
 	done
 
+	(( n += 1 ))
+
 # Save the ids and node names of every node that's an audio sink.
 	for (( i = 0; i < n; i++ )); do
-		if [[ ${pw_parsed[${i},class]} =~ $regex_sink ]]; then
+		if [[ ${pw_parsed[${i},class]} =~ ${regex[sink]} ]]; then
 			nodes["${pw_parsed[${i},id]}"]="${pw_parsed[${i},node]}"
 		fi
 	done
@@ -98,16 +97,20 @@ get_id () {
 
 # If the configuration file exists, get the node name from that.
 	if [[ -f $cfg_fn ]]; then
+		printf '\n%s: %s\n\n' 'Using audio output found in' "$cfg_fn"
+
 		mapfile -t lines <"$cfg_fn"
 
 		for (( i = 0; i < ${#lines[@]}; i++ )); do
 			line="${lines[${i}]}"
 
-			if [[ $line =~ $regex_cfg_node ]]; then
-				pw_node="${BASH_REMATCH[1]}"
-
-				break
+			if [[ ! $line =~ ${regex[cfg_node]} ]]; then
+				continue
 			fi
+
+			pw_node="${BASH_REMATCH[1]}"
+
+			break
 		done
 
 		if [[ -n $pw_node ]]; then
@@ -145,106 +148,110 @@ get_id () {
 	fi
 }
 
-# Creates a function called 'get_volume', which gets the current volume.
+# Creates a function, called 'get_volume', which gets the current
+# volume.
 get_volume () {
-	mapfile -t pw_dump < <(pw-dump "$pw_id" | sed -E -e 's/^[[:blank:]]*//' -e 's/[[:space:]]+/ /g')
+	declare line
+	declare -a pw_dump
+
+	mapfile -t pw_dump < <(pw-dump "$pw_id" | sed -E -e "s/${regex[blank1]}/\1/" -e "s/${regex[blank2]}/ /g")
 
 	for (( i = 0; i < ${#pw_dump[@]}; i++ )); do
 		line="${pw_dump[${i}]}"
 
-		if [[ $line =~ $regex_volume ]]; then
-			volume=$(tr -d '.' <<<"${BASH_REMATCH[1]}")
-
-			if [[ $volume =~ $regex_zero ]]; then
-				volume="${BASH_REMATCH[1]}"
-			fi
-
-			break
+		if [[ ! $line =~ ${regex[volume]} ]]; then
+			continue
 		fi
+
+		volume[in]=$(tr -d '.' <<<"${BASH_REMATCH[1]}")
+
+		if [[ ${volume[in]} =~ ${regex[zero]} ]]; then
+			volume[in]="${BASH_REMATCH[1]}"
+		fi
+
+		break
 	done
 
-	if [[ -z $volume ]]; then
+	if [[ -z ${volume[in]} ]]; then
 		exit
 	fi
 
-	printf '%s' "$volume"
+	volume[out]="${volume[in]}"
 }
 
-# Creates a function called 'set_volume', which sets the volume.
+# Creates a function, called 'set_volume', which sets the volume.
 set_volume () {
-	volume_tmp="$1"
-	mute_tmp="$2"
+	declare mute_tmp volume_1 volume_2
 
-	if [[ $volume_tmp =~ $regex_split ]]; then
+	mute_tmp="$1"
+
+	if [[ ${volume[out]} =~ ${regex[split]} ]]; then
 		volume_1="${BASH_REMATCH[1]}"
 		volume_2="${BASH_REMATCH[2]}"
 
-		if [[ $volume_2 =~ $regex_zero ]]; then
+		if [[ $volume_2 =~ ${regex[zero]} ]]; then
 			volume_2="${BASH_REMATCH[1]}"
 		fi
 	else
 		volume_1=0
-		volume_2="$volume_tmp"
+		volume_2="${volume[out]}"
 	fi
 
-	volume_dec=$(printf '%d.%06d' "$volume_1" "$volume_2")
+	volume[dec]=$(printf '%d.%06d' "$volume_1" "$volume_2")
 
-	pw-cli s "$pw_id" Props "{ mute: ${mute_tmp}, channelVolumes: [ ${volume_dec}, ${volume_dec} ] }" 1>&- 2>&-
+	pw-cli s "$pw_id" Props "{ mute: ${mute_tmp}, channelVolumes: [ ${volume[dec]}, ${volume[dec]} ] }" 1>&- 2>&-
 }
 
-# Creates a function called 'reset_volume', which resets the volume.
+# Creates a function, called 'reset_volume', which resets the volume.
 reset_volume () {
-	volume_tmp="$no_volume"
+	volume[out]="${volume[no]}"
 
-	set_volume "$volume_tmp" 'false'
+	set_volume 'false'
 
-	until [[ $volume_tmp -eq $full_volume ]]; do
-		volume_tmp=$(( volume_tmp + 100000 ))
+	until [[ ${volume[out]} -eq ${volume[full]} ]]; do
+		(( volume[out] += 100000 ))
 
-		if [[ $volume_tmp -gt $full_volume ]]; then
-			volume_tmp="$full_volume"
+		if [[ ${volume[out]} -gt ${volume[full]} ]]; then
+			volume[out]="${volume[full]}"
 		fi
 
 		sleep 0.1
 
-		set_volume "$volume_tmp" 'false'
+		set_volume 'false'
 	done
-
-	printf '%s' "$volume_tmp"
 }
 
-# Creates a function called 'sleep_low', which sleeps and then lowers
+# Creates a function, called 'sleep_low', which sleeps and then lowers
 # the volume.
 sleep_low () {
+	declare diff
+
 	diff="$1"
 
 	sleep "$interval"
 
-	if [[ $diff -ge $volume ]]; then
-		volume=0
+	if [[ $diff -ge ${volume[out]} ]]; then
+		volume[out]=0
 	else
-		volume=$(( volume - diff ))
+		(( volume[out] -= diff ))
 	fi
 
-	set_volume "$volume" 'false'
+	set_volume 'false'
 
-	printf '%s' "$volume"
+	printf '%s\n' "${volume[out]}"
 }
 
-# Creates a function called 'get_count', which will get the exact number
-# to decrease the volume by every 10 seconds. Since Bash can't do
+# Creates a function, called 'get_count', which will get the exact
+# number to decrease the volume by every 10 seconds. Since Bash can't do
 # floating-point arithmetic, this becomes slightly tricky. Keep in mind
 # that Bash always rounds down, never up. I've chosen 354 as the unit
 # because then it'll be exactly 1 minute left to take care of potential
 # remaining value.
 get_count () {
-	volume_tmp="$1"
-
-	unit=354
-	count=(0 0 0)
+	declare diff rem
 
 # Calculates the difference between current volume and target volume.
-	diff=$(( volume_tmp - target_volume ))
+	diff=$(( volume[out] - volume[target] ))
 
 # If the difference is greater than (or equal to) 354, do some
 # calculations. Otherwise just decrease by 0 until the very last second,
@@ -267,16 +274,17 @@ get_count () {
 	else
 		count[2]="$diff"
 	fi
-
-	printf '%s\n' "${count[@]}"
 }
 
-# Creates a function called 'spin', which will show a simple animation,
+# Creates a function, called 'spin', which will show a simple animation,
 # while waiting for the command output.
 spin () {
+	declare s
+	declare -a spinner
+
 	spinner=('   ' '.  ' '.. ' '...')
 
-	while true; do
+	while [[ 1 ]]; do
 		for s in "${spinner[@]}"; do
 			printf '\r%s%s' 'Wait' "$s"
 			sleep 0.5
@@ -288,42 +296,38 @@ spin () {
 get_id
 
 # Gets the volume.
-volume=$(get_volume)
-volume_og="$volume"
+get_volume
 
 # We (re)set the original volume as full volume, cause otherwise the
 # first lowering of volume is going to be much lower to the ears than
 # the value set in PipeWire. The volume set in the desktop environment
 # seems to be indpendent of the volume set in PipeWire, which might be
 # what's causing this.
-volume=$(reset_volume)
+reset_volume
 
 # If volume is greater than target volume, then...
-if [[ $volume -gt $target_volume ]]; then
-	mapfile -t count < <(get_count "$volume")
+if [[ ${volume[out]} -gt ${volume[target]} ]]; then
+	get_count
 
 # Starts the spinner animation...
 	spin &
 	spin_pid="$!"
 
-	printf '%s\n' "$volume"
+	printf '%s\n' "${volume[out]}"
 
 # For the first 354 10-second intervals, lower the volume by the value
 # in ${count[0]}
 	for n in {1..354}; do
-		volume=$(sleep_low "${count[0]}")
-		printf '%s\n' "$volume"
+		sleep_low "${count[0]}"
 	done
 
 # For 354-359, lower the volume by the value in ${count[1]}
 	for n in {1..5}; do
-		volume=$(sleep_low "${count[1]}")
-		printf '%s\n' "$volume"
+		sleep_low "${count[1]}"
 	done
 
 # Finally lower the volume by the value in ${count[2]}
-	volume=$(sleep_low "${count[2]}")
-	printf '%s\n' "$volume"
+	sleep_low "${count[2]}"
 
 	kill "$spin_pid"
 	printf '\n'

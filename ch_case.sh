@@ -9,8 +9,10 @@
 # case insensitive it doesn't matter which format you use, as it will
 # show up as upper case from within DOS anyway.
 
-set -eo pipefail
+set -o pipefail
 
+# Creates a function, called 'usage', which will print usage
+# instructions and then quit.
 usage () {
 	printf '\n%s\n\n' "Usage: $(basename "$0") [dir] [upper|lower]"
 	exit
@@ -22,13 +24,21 @@ elif [[ $2 != 'upper' && $2 != 'lower' ]]; then
 	usage
 fi
 
-dir=$(readlink -f "$1")
+declare case pause_msg
+declare -a vars files path_parts
+declare -A if of depth
+
+vars=('files' 'path_parts')
+
+if[dn]=$(readlink -f "$1")
+
 case="$2"
-depth='0'
+
+depth[max]=0
 
 pause_msg="
 You're about to recursively change all the file / directory names
-under \"${dir}\" to ${case} case.
+under \"${if[dn]}\" to ${case} case.
 
 Are you sure? [y/n]: "
 
@@ -40,41 +50,43 @@ fi
 
 printf '\n'
 
-mapfile -d'/' -t path_parts <<<"$dir"
-depth_orig=$(( ${#path_parts[@]} - 1 ))
+mapfile -d'/' -t path_parts <<<"${if[dn]}"
+depth[min]=$(( ${#path_parts[@]} - 1 ))
 
-mapfile -t files < <(find "$dir" -iname "*" 2>&-)
+mapfile -t files < <(find "${if[dn]}" -exec printf '%q\n' {} + 2>&-)
 
 for (( i = 0; i < ${#files[@]}; i++ )); do
-	f="${files[${i}]}"
+	eval if[fn]="${files[${i}]}"
 
-	mapfile -d'/' -t path_parts <<<"$f"
-	depth_tmp=$(( ${#path_parts[@]} - 1 ))
-	depth_diff=$(( depth_tmp - depth_orig ))
+	mapfile -d'/' -t path_parts <<<"${if[fn]}"
+	depth[tmp]=$(( ${#path_parts[@]} - 1 ))
+	depth[diff]=$(( depth[tmp] - depth[min] ))
 
-	if [[ $depth_diff -gt $depth ]]; then
-		depth="$depth_diff"
+	if [[ ${depth[diff]} -gt ${depth[max]} ]]; then
+		depth[max]="${depth[diff]}"
 	fi
 done
 
-unset -v files path_parts
+unset -v "${vars[@]}"
 
-for (( i = depth; i > 0; i-- )); do
-	find "$dir" -mindepth "$i" -maxdepth "$i" -iname "*" | while read f; do
-		dn=$(dirname "$f")
-		bn=$(basename "$f")
+for (( i = depth[max]; i > 0; i-- )); do
+	mapfile -t files < <(find "${if[dn]}" -mindepth "$i" -maxdepth "$i" -exec printf '%q\n' {} + 2>&-)
 
-		if [[ $case == 'upper' ]]; then
-			new_bn="${bn^^}"
-		elif [[ $case == 'lower' ]]; then
-			new_bn="${bn,,}"
-		fi
+	for (( j = 0; j < ${#files[@]}; j++ )); do
+		eval if[fn]="${files[${j}]}"
+		of[dn]=$(dirname "${if[fn]}")
+		if[bn]=$(basename "${if[fn]}")
 
-		new_f="${dn}/${new_bn}"
+		of[upper]="${if[bn]^^}"
+		of[lower]="${if[bn],,}"
 
-		if [[ $new_bn != $bn ]]; then
-			printf '%s\n' "$new_f"
-			mv -n "$f" "$new_f"
+		of[bn]="${of[${case}]}"
+
+		of[fn]="${of[dn]}/${of[bn]}"
+
+		if [[ ${of[bn]} != "${if[bn]}" ]]; then
+			printf '%s\n' "${of[fn]}"
+			mv -n "${if[fn]}" "${of[fn]}"
 		fi
 	done
 done

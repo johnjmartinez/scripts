@@ -1,9 +1,10 @@
 #!/bin/bash
 
-# This script is meant to replace echo commands in Bash scripts, with
-# printf. 'echo' is an external command, while 'printf' is a Bash
-# built-in. Hence this can have a performance impact, especially if
-# the script is printing lots of text to the terminal or to files.
+# This script is meant to replace 'echo' commands in Bash scripts, with
+# 'printf'. Both echo and printf exist as Bash built-ins (as well as
+# external commands). When they are run, the built-in takes precedence.
+
+# I prefer to use printf over echo, as it's more flexible in my opinion.
 
 # There's still a need to go through the output script file manually
 # after having run it through this script. Because the string that was
@@ -17,28 +18,39 @@
 
 # The output script file replaces the input file.
 
-if=$(readlink -f "$1")
-
-regex1='^([[:space:]]*)#'
-regex2='echo( \-[[:alpha:]]+){0,} *'
-regex3='printf '\''%s\\n'\'' '
-
-if [[ ! -f $if ]]; then
+# Creates a function, called 'usage', which will print usage
+# instructions and then quit.
+usage () {
 	printf '\n%s\n\n' "Usage: $(basename "$0") [file]"
 	exit
+}
+
+if [[ ! -f $1 ]]; then
+	usage
 fi
 
-mapfile -t lines <"$if"
+declare if printf_cmd line
+declare -a lines
+declare -A regex
 
-for (( i=0; i<${#lines[@]}; i++ )); do
+if=$(readlink -f "$1")
+
+regex[comment]='^[[:blank:]]*#+'
+regex[echo]='echo( -[[:alpha:]]+){0,}[[:blank:]]*'
+
+printf_cmd='printf '\''%s\\n'\'' '
+
+mapfile -t lines < <(tr -d '\r' <"$if")
+
+for (( i = 0; i < ${#lines[@]}; i++ )); do
 	line="${lines[${i}]}"
 
-	if [[ $line =~ $regex1 ]]; then
+	if [[ $line =~ ${regex[comment]} ]]; then
 		continue
 	fi
 
-	if [[ $line =~ $regex2 ]]; then
-		lines["${i}"]=$(sed -E "s/${regex2}/${regex3}/g" <<<"$line")
+	if [[ $line =~ ${regex[echo]} ]]; then
+		lines["${i}"]=$(sed -E "s/${regex[echo]}/${printf_cmd}/g" <<<"$line")
 	fi
 done
 

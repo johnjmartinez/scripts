@@ -27,6 +27,8 @@
 # 1 = Japan
 # 5 = NTSC
 
+# Creates a function, called 'usage', which will print usage
+# instructions and then quit.
 usage () {
 	printf '\n%s\n\n' "Usage: $(basename "$0") [ROM directory]"
 	exit
@@ -36,24 +38,27 @@ if [[ ! -d $1 ]]; then
 	usage
 fi
 
-dn=$(readlink -f "$1")
+declare if_dn of_dn session title target
+declare -a global_vars priority files
+declare -A regex titles
+
 session="${RANDOM}-${RANDOM}"
-sorted_dn="sorted-${session}"
 
-declare -A titles
-global_vars=(fn bn region region_n)
+if_dn=$(readlink -f "$1")
+of_dn="sorted-${session}"
 
-regex_blank='^[[:blank:]]*(.*)[[:blank:]]*$'
-regex_ext='\.([^.]*)$'
-regex1="\(([A-Z]{1,3}|[0-9]{1})\).*${regex_ext}"
-regex2="^.*(\[\!\]).*${regex_ext}"
+regex[blank]='^[[:blank:]]*(.*)[[:blank:]]*$'
+regex[ext]='\.([^.]*)$'
+regex[1]="\(([A-Z]{1,3}|[0-9]{1})\).*${regex[ext]}"
+regex[2]="^.*(\[\!\]).*${regex[ext]}"
 
+global_vars=('fn' 'bn' 'region' 'region_n')
 priority=('^U$' 'U' '^4$' '^UK$' '^A$' 'A' '^W$' '^E$' 'E' '^8$' '^J$' 'J' '^1$' '^5$')
 
-cd "$dn"
-mkdir "$sorted_dn"
+cd "$if_dn"
+mkdir "$of_dn"
 
-mapfile -t files < <(find "$dn" -maxdepth 1 -type f -iname "*" 2>&-)
+mapfile -t files < <(find "$if_dn" -maxdepth 1 -type f 2>&-)
 
 set_target () {
 	set_vars () {
@@ -63,19 +68,21 @@ set_target () {
 	for (( j = 0; j < ${#priority[@]}; j++ )); do
 		target="${priority[${j}]}"
 
-		if [[ $region =~ $target ]]; then
-			region_n="$j"
+		if [[ ! $region =~ $target ]]; then
+			continue
+		fi
 
-			if [[ ${titles[${title}]} != 'undef' ]]; then
-				if [[ $region_n -lt ${titles[${title}]} ]]; then
-					set_vars
-				fi
-			else
+		region_n="$j"
+
+		if [[ ${titles[${title}]} != 'undef' ]]; then
+			if [[ $region_n -lt ${titles[${title}]} ]]; then
 				set_vars
 			fi
-
-			break
+		else
+			set_vars
 		fi
+
+		break
 	done
 }
 
@@ -83,13 +90,13 @@ loop_intro () {
 	fn="${files[${i}]}"
 	bn=$(basename "$fn")
 
-	if [[ ! $bn =~ $regex1 ]]; then
+	if [[ ! $bn =~ ${regex[1]} ]]; then
 		return
 	fi
 
 	region="${BASH_REMATCH[1]}"
 
-	if [[ ! $bn =~ $regex2 ]]; then
+	if [[ ! $bn =~ ${regex[2]} ]]; then
 		unset -v region
 	fi
 }
@@ -99,11 +106,11 @@ get_games () {
 		fn="${files[${i}]}"
 		bn=$(basename "$fn")
 
-		if [[ ! $bn =~ $regex1 ]]; then
+		if [[ ! $bn =~ ${regex[1]} ]]; then
 			continue
 		fi
 
-		title=$(sed -E "s/${regex1}//" <<<"$bn")
+		title=$(sed -E "s/${regex[1]}//" <<<"$bn")
 
 		if [[ -n $title ]]; then
 			titles["${title}"]='undef'
@@ -113,9 +120,9 @@ get_games () {
 
 get_games
 
-# Get the verified ROMs.
+# Gets the verified ROMs.
 for title in "${!titles[@]}"; do
-	mapfile -t files < <(find "$dn" -maxdepth 1 -type f -name "${title}*" 2>&-)
+	mapfile -t files < <(find "$if_dn" -maxdepth 1 -type f -name "${title}*" 2>&-)
 
 	for (( i = 0; i < ${#files[@]}; i++ )); do
 		declare "${global_vars[@]}"
@@ -145,15 +152,17 @@ for title in "${!titles[@]}"; do
 		for (( j = 0; j < ${#priority[@]}; j++ )); do
 			target="${priority[${j}]}"
 
-			if [[ $region =~ $target ]]; then
-				region_n="$j"
-				break
+			if [[ ! $region =~ $target ]]; then
+				continue
 			fi
+
+			region_n="$j"
+			break
 		done
 
 		if [[ $region_n == "${titles[${title}]}" ]]; then
 			printf '%s\n' "$bn"
-			mv -n "$bn" "$sorted_dn" || exit
+			mv -n "$bn" "$of_dn" || exit
 		fi
 
 		unset -v "${global_vars[@]}"

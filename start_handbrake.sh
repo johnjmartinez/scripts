@@ -1,34 +1,42 @@
 #!/bin/bash
-# This script starts / resumes HandBrake again, after it has been paused
-# by 'stop_handbrake.sh'.
+
+# This script starts / resumes HandBrakeCLI again, after it has been
+# paused by 'stop_handbrake.sh'.
 
 # The script uses the SIGCONT (18) signal to resume the process.
 # To get a list of available signals: kill -l
 
+declare comm pid args state
+declare -a hb_pids
+declare -A regex
+
 comm='HandBrakeCLI'
-pid_list_f='/dev/shm/handbrake_pid.txt'
 
-if [[ ! -f $pid_list_f ]]; then
-	exit
-fi
+regex[pid_comm]='^[[:blank:]]*([0-9]+)[[:blank:]]*(.*)$'
 
-pid=$(head -n 1 "$pid_list_f")
+mapfile -t hb_pids < <(ps -C "$comm" -o pid=,args=)
 
-if [[ -n $pid ]]; then
-	name=$(ps -p "$pid" -o comm | tail -n +2)
-
-	if [[ $name == "$comm" ]]; then
-		printf '\n%s\n' 'STARTING!'
-		printf '%s\n' "NAME: ${name} : PID: ${pid}"
-
-		kill -s 18 "$pid"
-	else
-		exit
+for (( i = 0; i < ${#hb_pids[@]}; i++ )); do
+	if [[ ! ${hb_pids[${i}]} =~ ${regex[pid_comm]} ]]; then
+		continue
 	fi
-fi
 
-mapfile -t pid_list < <(tail -n +2 "$pid_list_f")
+	pid="${BASH_REMATCH[1]}"
+	args="${BASH_REMATCH[2]}"
 
-if [[ ${#pid_list[@]} -gt 0 ]]; then
-	printf '%s\n' "${pid_list[@]}" > "$pid_list_f"
-fi
+	state=$(ps -p "$pid" -o state=)
+
+	if [[ $state != 'T' ]]; then
+		continue
+	fi
+
+	cat <<INFO
+
+STARTING!
+PID: ${pid}
+COMMAND: ${args}
+
+INFO
+
+	kill -s 18 "$pid"
+done

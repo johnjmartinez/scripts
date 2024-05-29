@@ -13,27 +13,30 @@
 # read by 'mkvinfo'. The temporary files are deleted after the script is
 # done.
 
-if=$(readlink -f "$1")
+declare session default files_n sub_tracks_n range1_tmp range2_tmp string
+declare sub_tmp num_tmp lang_tmp name_tmp
+declare -a cmd files files_tmp args full_args range1 range2
+declare -A if of regex sub_tracks
 
 session="${RANDOM}-${RANDOM}"
-of="${if%.[^.]*}-${session}.mkv"
+
+if[fn]=$(readlink -f "$1")
+of[fn]="${if[fn]%.*}-${session}.mkv"
+
+regex[start]='^\|\+ Tracks$'
+regex[stop]='^\|\+ '
+regex[strip]='^\| +\+ (.*)$'
+regex[track]='^Track$'
+regex[num]='^Track number: [0-9]+ \(track ID for mkvmerge & mkvextract: ([0-9]+)\)$'
+regex[sub]='^Track type: subtitles$'
+regex[lang]='^Language( \(.*\)){0,1}: (.*)$'
+regex[name]='^Name: (.*)$'
+
+regex[fn]='^(.*)\.([^.]*)$'
+regex[lang_arg]='^[[:alpha:]]{3}$'
 
 files_n=0
 sub_tracks_n=0
-declare -a files files_tmp args full_args range1 range2
-declare -A sub_tracks
-
-regex_start='^\|\+ Tracks$'
-regex_stop='^\|\+ '
-regex_strip='^\| +\+ (.*)$'
-regex_track="^Track$"
-regex_num="^Track number: [0-9]+ \(track ID for mkvmerge & mkvextract: ([0-9]+)\)$"
-regex_sub="^Track type: subtitles$"
-regex_lang="^Language( \(.*\)){0,1}: (.*)$"
-regex_name="^Name: (.*)$"
-
-regex_fn='^(.*)\.([^.]*)$'
-regex_lang_arg='^[[:alpha:]]{3}$'
 
 mapfile -t cmd < <(command -v mkvinfo mkvmerge)
 
@@ -42,8 +45,8 @@ if [[ ${#cmd[@]} -ne 2 ]]; then
 	exit
 fi
 
-# Creates a function called 'usage', which will print usage instructions
-# and then quit.
+# Creates a function, called 'usage', which will print usage
+# instructions and then quit.
 usage () {
 	cat <<USAGE
 
@@ -65,25 +68,63 @@ USAGE
 	exit
 }
 
-# Creates a function called 'get_tracks', which will read the metadata
+# Creates a function, called 'run_cmd', which will be used to run
+# external commands, capture their output, and print the output (and
+# quit) if the command fails.
+run_cmd () {
+	declare exit_status
+	declare -a cmd_stdout
+
+	mapfile -t cmd_stdout < <(eval "$@" 2>&1; printf '%s\n' "$?")
+
+	exit_status="${cmd_stdout[-1]}"
+	unset -v cmd_stdout[-1]
+
+# Prints the output from the command if it has a non-zero exit status,
+# and then quits.
+	if [[ $exit_status != '0' ]]; then
+		printf '%s\n' "${cmd_stdout[@]}"
+		printf '\n'
+		exit
+	fi
+}
+
+# Creates a function, called 'clean_up', which will remove temporary
+# files, if they exist.
+clean_up () {
+	if [[ ${#files_tmp[@]} -eq 0 ]]; then
+		return
+	fi
+
+	for (( i = 0; i < ${#files_tmp[@]}; i++ )); do
+		if[fn_tmp]="${files_tmp[${i}]}"
+
+		if [[ -f ${if[fn_tmp]} ]]; then
+			rm "${if[fn_tmp]}"
+		fi
+	done
+}
+
+# Creates a function, called 'get_tracks', which will read the metadata
 # of media files, and if they contain subtitle tracks, store those in
 # the 'sub_tracks' hash.
 get_tracks () {
-	if_tmp=$(readlink -f "$1")
-	bn_tmp=$(basename "$if_tmp")
-	dn_tmp=$(dirname "$if_tmp")
+	if[fn_tmp]=$(readlink -f "$1")
+	if[bn_tmp]=$(basename "${if[fn_tmp]}")
+	if[dn_tmp]=$(dirname "${if[fn_tmp]}")
 
-	declare ext_tmp of_tmp
-	declare -a mkvinfo_tracks
+	declare fn_tmp ext_tmp session_tmp switch tracks_n line
+	declare -a mkvinfo_lines mkvinfo_tracks
 	declare -A tracks
 
 # Parses the input file name, and separates basename from extension.
 # If this fails, return from the function.
-	if [[ ${bn_tmp,,} =~ $regex_fn ]]; then
-		match=("${BASH_REMATCH[@]:1}")
-		ext_tmp="${match[1]}"
+	if [[ ${if[bn_tmp],,} =~ ${regex[fn]} ]]; then
+		fn_tmp="${BASH_REMATCH[1]}"
+		ext_tmp="${BASH_REMATCH[2]}"
 		session_tmp="${RANDOM}-${RANDOM}"
-		of_tmp="${dn_tmp}/${match[0]}-tmp-${session_tmp}.mkv"
+
+		of[fn_tmp]="${if[dn_tmp]}/${fn_tmp}-tmp-${session_tmp}.mkv"
 	else
 		return
 	fi
@@ -92,23 +133,20 @@ get_tracks () {
 # add the file name to the 'files_tmp' array, so it can be deleted
 # later.
 	if [[ $ext_tmp != 'mkv' ]]; then
-		mapfile -t mkvmerge_lines < <(mkvmerge -o "$of_tmp" "$if_tmp")
+		printf '\nRemuxing: %s\n' "${if[fn_tmp]}"
 
-		if [[ $? -ne 0 ]]; then
-			printf '%s\n' "${mkvmerge_lines[@]}"
-			printf '\n'
-			return
-		fi
+		run_cmd mkvmerge -o \""${of[fn_tmp]}"\" \""${if[fn_tmp]}"\"
 
-		files_tmp+=("$of_tmp")
-		if_tmp="$of_tmp"
+		files_tmp+=("${of[fn_tmp]}")
+
+		if[fn_tmp]="${of[fn_tmp]}"
 	fi
 
 # Adds file name to the 'files' array, so it can be used later to
 # construct the mkvmerge command.
-	files["${files_n}"]="$if_tmp"
+	files["${files_n}"]="${if[fn_tmp]}"
 
-	mapfile -t mkvinfo_lines < <(mkvinfo "$if_tmp" 2>&-)
+	mapfile -t mkvinfo_lines < <(mkvinfo "${if[fn_tmp]}" 2>&-)
 
 # Singles out the part that lists the tracks, and ignores the rest of
 # the output from 'mkvinfo'.
@@ -117,23 +155,25 @@ get_tracks () {
 	for (( i = 0; i < ${#mkvinfo_lines[@]}; i++ )); do
 		line="${mkvinfo_lines[${i}]}"
 
-		if [[ $line =~ $regex_start ]]; then
+		if [[ $line =~ ${regex[start]} ]]; then
 			switch=1
 			continue
 		fi
 
-		if [[ $switch -eq 1 ]]; then
-			if [[ $line =~ $regex_stop ]]; then
-				switch=0
-				break
-			fi
-
-			if [[ $line =~ $regex_strip ]]; then
-				line="${BASH_REMATCH[1]}"
-			fi
-
-			mkvinfo_tracks+=("$line")
+		if [[ $switch -eq 0 ]]; then
+			continue
 		fi
+
+		if [[ $line =~ ${regex[stop]} ]]; then
+			switch=0
+			break
+		fi
+
+		if [[ $line =~ ${regex[strip]} ]]; then
+			line="${BASH_REMATCH[1]}"
+		fi
+
+		mkvinfo_tracks+=("$line")
 	done
 
 	unset -v mkvinfo_lines
@@ -144,34 +184,36 @@ get_tracks () {
 	for (( i = 0; i < ${#mkvinfo_tracks[@]}; i++ )); do
 		line="${mkvinfo_tracks[${i}]}"
 
-		if [[ $line =~ $regex_track ]]; then
-			tracks_n=$(( tracks_n + 1 ))
+		if [[ $line =~ ${regex[track]} ]]; then
+			(( tracks_n += 1 ))
 			tracks["${tracks_n},sub"]=0
 		fi
 
-		if [[ $line =~ $regex_num ]]; then
+		if [[ $line =~ ${regex[num]} ]]; then
 			tracks["${tracks_n},num"]="${BASH_REMATCH[1]}"
 		fi
 
-		if [[ $line =~ $regex_sub ]]; then
+		if [[ $line =~ ${regex[sub]} ]]; then
 			tracks["${tracks_n},sub"]=1
 		fi
 
 # For some tracks, the language can be listed twice. First with a
 # three-letter code, and then with a two-letter code. The first code is
 # preferred by this script.
-		if [[ $line =~ $regex_lang ]]; then
+		if [[ $line =~ ${regex[lang]} ]]; then
 			if [[ -z ${tracks[${tracks_n},lang]} ]]; then
-				tracks["${tracks_n},lang"]="${BASH_REMATCH[2]}"
+				tracks["${tracks_n},lang"]="${BASH_REMATCH[2],,}"
 			fi
 		fi
 
-		if [[ $line =~ $regex_name ]]; then
-			tracks["${tracks_n},name"]="${BASH_REMATCH[1]}"
+		if [[ $line =~ ${regex[name]} ]]; then
+			if [[ -z ${tracks[${tracks_n},name]} ]]; then
+				tracks["${tracks_n},name"]="${BASH_REMATCH[1]}"
+			fi
 		fi
 	done
 
-	tracks_n=$(( tracks_n + 1 ))
+	(( tracks_n += 1 ))
 
 	unset -v mkvinfo_tracks
 
@@ -183,7 +225,7 @@ get_tracks () {
 		name_tmp="${tracks[${i},name]}"
 
 		if [[ $sub_tmp -eq 1 ]]; then
-			sub_tracks_n=$(( sub_tracks_n + 1 ))
+			(( sub_tracks_n += 1 ))
 		else
 			continue
 		fi
@@ -212,7 +254,7 @@ while [[ $# -gt 0 ]]; do
 		'-lang')
 			shift
 
-			if [[ $1 =~ $regex_lang_arg ]]; then
+			if [[ $1 =~ ${regex[lang_arg]} ]]; then
 				sub_tracks["${sub_tracks_n},lang"]="${1,,}"
 			else
 				usage
@@ -229,11 +271,11 @@ while [[ $# -gt 0 ]]; do
 		;;
 		*)
 			if [[ -f $1 ]]; then
-				files_n=$(( files_n + 1 ))
+				(( files_n += 1 ))
 
-				range1["${files_n}"]=$(( $sub_tracks_n + 1 ))
+				range1["${files_n}"]=$(( sub_tracks_n + 1 ))
 				get_tracks "$1"
-				range2["${files_n}"]=$(( $sub_tracks_n + 1 ))
+				range2["${files_n}"]=$(( sub_tracks_n + 1 ))
 
 				shift
 			else
@@ -250,8 +292,8 @@ fi
 
 # Adds 1 to $files_n and $sub_tracks_n, so we can loop through all the
 # elements. Otherwise, the last element will be skipped.
-files_n=$(( files_n + 1 ))
-sub_tracks_n=$(( sub_tracks_n + 1 ))
+(( files_n += 1 ))
+(( sub_tracks_n += 1 ))
 
 # Prints all the subtitle tracks, and asks the user to choose the
 # default track, saves that choice in the $default variable.
@@ -273,10 +315,17 @@ for (( i = 1; i < files_n; i++ )); do
 done
 
 printf '\n'
-read -p '>' default
 
-until [[ $default -lt $sub_tracks_n ]]; do
-	read -p '>' default
+until [[ -n $default ]]; do
+	read -p '>'
+
+	if [[ ! $REPLY =~ ^[0-9]+$ ]]; then
+		continue
+	fi
+
+	if [[ -n ${sub_tracks[${REPLY},num]} ]]; then
+		default="$REPLY"
+	fi
 done
 
 printf '\nDefault subtitle track: %s\n' "$default"
@@ -320,15 +369,13 @@ for (( i = 1; i < files_n; i++ )); do
 	unset -v args_tmp
 done
 
-full_args=(mkvmerge -o \""$of"\" "${args[@]}")
+full_args=(mkvmerge -o \""${of[fn]}"\" "${args[@]}")
 
 # Runs mkvmerge.
 eval "${full_args[@]}"
 
 # Removes temporary MKV files.
-if [[ -n ${files_tmp[@]} ]]; then
-	rm "${files_tmp[@]}"
-fi
+clean_up
 
 # Prints the mkvmerge command.
 string="${full_args[@]}"

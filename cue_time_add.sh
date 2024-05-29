@@ -7,20 +7,19 @@
 # around an infinite while loop, and only quits once killed or Ctrl+C is
 # pressed.
 
+declare track_n frames in out
 declare -a format
 
 format[0]='^[0-9]+$'
-format[1]='([0-9]{2}):([0-9]{2}):([0-9]{2})'
+format[1]='^([0-9]{2,}):([0-9]{2}):([0-9]{2})$'
 
-# Creates a function called 'time_convert', which converts track length
-# back and forth between the time (mm:ss:ff) format and frames /
-# sectors.
+# Creates a function, called 'time_convert', which converts track
+# timestamps back and forth between the time (mm:ss:ff) format and
+# frames / sectors.
 time_convert () {
-	time="$1"
+	declare time m s f
 
-	m=0
-	s=0
-	f=0
+	time="$1"
 
 # If argument is in the mm:ss:ff format...
 	if [[ $time =~ ${format[1]} ]]; then
@@ -28,7 +27,7 @@ time_convert () {
 		s="${BASH_REMATCH[2]#0}"
 		f="${BASH_REMATCH[3]#0}"
 
-# Converting minutes and seconds to frames, and adding all the numbers
+# Converts minutes and seconds to frames, and adds all the numbers
 # together.
 		m=$(( m * 60 * 75 ))
 		s=$(( s * 75 ))
@@ -39,19 +38,12 @@ time_convert () {
 	elif [[ $time =~ ${format[0]} ]]; then
 		f="$time"
 
-# While $f (frames) is equal to (or greater than) 75, clear the $f
-# variable and add 1 to the $s (seconds) variable.
-		while [[ $f -ge 75 ]]; do
-			s=$(( s + 1 ))
-			f=$(( f - 75 ))
-		done
+# Converts frames to seconds and minutes.
+		s=$(( f / 75 ))
+		m=$(( s / 60 ))
 
-# While $s (seconds) is equal to (or greater than) 60, clear the $s
-# variable and add 1 to the $m (minutes) variable.
-		while [[ $s -ge 60 ]]; do
-			m=$(( m + 1 ))
-			s=$(( s - 60 ))
-		done
+		f=$(( f % 75 ))
+		s=$(( s % 60 ))
 
 		time=$(printf '%02d:%02d:%02d' "$m" "$s" "$f")
 	fi
@@ -59,32 +51,33 @@ time_convert () {
 	printf '%s' "$time"
 }
 
-# Initiate the global variable $t, for counting the iterations of the
-# loop, which will be echoed as track number. $frames stores the total
-# time in frames.
-t=1
+# Initiates the global variables. For counting the iterations of the
+# loop (track number), and storing the total time in frames.
+track_n=1
 frames=0
 
 printf '\n%s\n\n' "This script will calculate the total time of all the times given."
 printf '%s\n\n' "Type or paste a time in the mm:ss:ff format."
 
-while true; do
-# Read input.
+while [[ 1 ]]; do
+# Reads input.
 	read in
 
+# Continues the next iteration of the loop if input doesn't match the
+# correct format.
 	if [[ ! $in =~ ${format[1]} ]]; then
 		continue
 	fi
 
-# Add 1 to the track ($t) variable.
-	let t++
+# Adds 1 to the track number.
+	(( track_n += 1 ))
 
-# Convert time to frames, and add that number to the total number in the
-# $frames variable. Convert that number back to the mm:ss:ff format.
-	tmp_frames=$(time_convert "$in")
-	frames=$(( frames + tmp_frames ))
-	time=$(time_convert "$frames")
+# Converts time to frames, and adds that number to the total time.
+# Converts that number back to the mm:ss:ff format.
+	in=$(time_convert "$in")
+	(( frames += in ))
+	out=$(time_convert "$frames")
 
 # Prints the current total time in the mm:ss:ff format.
-	printf "\n*** Track %d start: %s ***\n" "$t" "$time"
+	printf "\n*** Track %d start: %s ***\n" "$track_n" "$out"
 done

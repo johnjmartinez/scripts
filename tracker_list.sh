@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# This script parses a BitTorrent tracker list text file, sorts, removes
+# This script parses BitTorrent tracker list text files, sorts, removes
 # duplicates, checks online status of each URL, and prints the list to
 # STDOUT in the correct format.
 
@@ -22,84 +22,157 @@
 
 # tracker_list.sh 'trackers.txt' | tee 'trackers_checked.txt'
 
+declare nocheck
+declare -a files
+
+nocheck=0
+
+# Creates a function, called 'usage', which will print usage
+# instructions and then quit.
 usage () {
 	printf '\n%s\n\n' "Usage: $(basename "$0") [tracker txt] [-nocheck]"
 	exit
 }
 
-if [[ ! -f $1 ]]; then
-	usage
-elif [[ -n $2 && $2 != '-nocheck' ]]; then
+# The loop below handles the arguments to the script.
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		'-nocheck')
+			nocheck=1
+
+			shift
+		;;
+		*)
+			if [[ -f $1 ]]; then
+				files+=("$(readlink -f "$1")")
+			else
+				usage
+			fi
+
+			shift
+		;;
+	esac
+done
+
+if [[ ${#files[@]} -eq 0 ]]; then
 	usage
 fi
 
-nocheck=0
+declare line end_l end_tmp_l switch n
+declare protocol address end port tracker
+declare protocol_tmp address_tmp end_tmp port_tmp
+declare -a lines_out protocols addresses ends ports
+declare -A regex
 
-if [[ $2 == '-nocheck' ]]; then
-	nocheck=1
-fi
+regex[url]='^([[:alpha:]]+):\/\/([^:\/]+)(.*)$'
+regex[end]='^(.*):([0-9]+)(.*)$'
 
-if=$(readlink -f "$1")
-switch=0
+# Creates a function, called 'get_lines', which reads the files given as
+# arguments to the script into memory.
+get_lines () {
+	declare fn
+	declare -a lines_in
 
-regex1='^([[:alpha:]]+)://'
-regex2=':([0-9]+)'
-regex3='/.*$'
-regex4='/announce(\.[^.]*){0,1}$'
-regex5='/$'
+	for (( z = 0; z < ${#files[@]}; z++ )); do
+		fn="${files[${z}]}"
 
-declare -a trackers
+		declare -a lines
 
-mapfile -t lines < <(tr -d '\r' <"$if" | tr -d '[:blank:]' | tr '[:upper:]' '[:lower:]' | sort --unique)
+		mapfile -t lines < <(tr -d '\r' <"$fn" | tr '[:upper:]' '[:lower:]' | sed -E 's/[[:blank:]]+/\n/g')
+		lines_in+=("${lines[@]}")
 
-for (( i = 0; i < ${#lines[@]}; i++ )); do
-	line="${lines[${i}]}"
+		unset -v lines
+	done
+
+	mapfile -t lines_out < <(printf '%s\n' "${lines_in[@]}" | sort -u)
+}
+
+get_lines
+
+for (( i = 0; i < ${#lines_out[@]}; i++ )); do
+	line="${lines_out[${i}]}"
+
 	switch=0
 
-	if [[ -n $line ]]; then
-		for (( j = 0; j < ${#trackers[@]}; j++ )); do
-			line_tmp=$(sed -E -e "s_${regex4}__" -e "s_${regex5}__" <<<"$line")
+# Deletes the line from memory, since we already have a temporary
+# duplicate.
+	lines_out["${i}"]=''
 
-			if [[ ${trackers[${j}]} =~ $line_tmp ]]; then
-				switch=1
+# Checks if the current line matches the URL regex, and if not continue
+# the next iteration of the loop.
+	if [[ ! $line =~ ${regex[url]} ]]; then
+		continue
+	fi
 
-				array_l="${#trackers[${j}]}"
-				line_l="${#line}"
+	protocol="${BASH_REMATCH[1]}"
+	address="${BASH_REMATCH[2]}"
+	end="${BASH_REMATCH[3]}"
 
-				if [[ $line_l > $array_l && $line =~ $regex4 ]]; then
-					trackers["${j}"]="$line"
-				fi
-			fi
-		done
+# If there's no port number in the URL, use port 80. Otherwise, just use
+# the one in the URL.
+	port=80
 
-		if [[ $switch -eq 0 ]]; then
-			trackers+=("$line")
+	if [[ $end =~ ${regex[end]} ]]; then
+		end="${BASH_REMATCH[1]}${BASH_REMATCH[3]}"
+		port="${BASH_REMATCH[2]}"
+	fi
+
+# Compares the tracker URL with ones that have already been added to the
+# list.
+	for (( j = 0; j < ${#addresses[@]}; j++ )); do
+		protocol_tmp="${protocols[${j}]}"
+		address_tmp="${addresses[${j}]}"
+		end_tmp="${ends[${j}]}"
+		port_tmp="${ports[${j}]}"
+
+		if [[ $protocol != "$protocol_tmp" ]]; then
+			continue
 		fi
+
+		if [[ $port != "$port_tmp" ]]; then
+			continue
+		fi
+
+# If the address matches, then check which has the longest URL ending.
+# A new element will not be created in the list, but the longest match
+# is used.
+		if [[ $address == "$address_tmp" ]]; then
+			switch=1
+
+			end_l="${#end}"
+			end_tmp_l="${#end_tmp}"
+
+			if [[ $end_l > $end_tmp_l ]]; then
+				ends["${j}"]="$end"
+			fi
+		fi
+	done
+
+# If this URL is unique, add it to the different lists.
+	if [[ $switch -eq 0 ]]; then
+		protocols+=("$protocol")
+		addresses+=("$address")
+		ends+=("$end")
+		ports+=("$port")
 	fi
 done
 
-declare -A md5h
+# The loop below goes through each URL, and checks online status. If the
+# URL is online, print it. If '-nocheck' was used, just print the URL
+# and keep iterating the loop.
+for (( i = 0; i < ${#addresses[@]}; i++ )); do
+	protocol="${protocols[${i}]}"
+	address="${addresses[${i}]}"
+	end="${ends[${i}]}"
+	port="${ports[${i}]}"
 
-for (( i = 0; i < ${#trackers[@]}; i++ )); do
-	tracker="${trackers[${i}]}"
-	md5=$(md5sum -b <<<"$tracker")
-	md5="${md5%% *}"
-
-	if [[ ${md5h[${md5}]} -eq 1 ]]; then
-		continue
-	else
-		md5h["${md5}"]=1
-	fi
+	tracker="${protocol}://${address}:${port}${end}"
 
 	if [[ $nocheck -eq 1 ]]; then
 		printf '%s\n\n' "$tracker"
 
 		continue
 	fi
-
-	address=$(sed -E -e "s_${regex1}__" -e "s_${regex2}__" -e "s_${regex3}__" <<<"$tracker")
-	protocol=$(grep -Eo "$regex1" <<<"$tracker" | sed -E "s_${regex1}_\1_")
-	port=$(grep -Eo "$regex2" <<<"$tracker" | sed -E "s_${regex2}_\1_")
 
 	case $protocol in
 		http*)

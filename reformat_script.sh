@@ -10,146 +10,208 @@
 # * Replace individual spaces at the beginning of each line with tabs
 # (4 spaces / tab).
 # * Reduce the number of successive empty lines to a maximum of 1.
-# * Remove space at the beginning of comment lines.
-# * Reduce multiple #s to just 1 # in comment lines.
 # * Remove space at the end of lines.
-# * Replace multiple successive spaces in comments with just one space.
-# * Reduce the total length of comment lines to 72 characters.
-
-if=$(readlink -f "$1")
-bn=$(basename "$if")
-session="${RANDOM}-${RANDOM}"
-tmp_dn="/dev/shm/reformat_script-${session}"
-of="${tmp_dn}/${bn}"
-of_tmp="${tmp_dn}/tmp"
-
-limit='72'
-regex1='^([[:space:]]*)(#+)([[:space:]]*)'
-regex2='^[[:space:]]+'
-regex3='[[:space:]]+$'
-regex4='( +)'
-regex5='^( {4})'
-regex6='^#!'
-
-tab=$(printf '\t')
-switch='0'
+# * Remove space at the beginning of comments.
+# * Reduce multiple #s to just 1 # in comments.
+# * Replace multiple successive spaces in comments with just 1 space.
+# * Reduce the total length of comments to 72 characters.
 
 set -eo pipefail
 
-# If the script isn't run with sudo / root privileges, quit.
-if [[ $(whoami) != root ]]; then
-	printf '\n%s\n\n' "You need to be root to run this script!"
-	exit
-fi
-
-if [[ ! -f $if ]]; then
+# Creates a function, called 'usage', which will print usage
+# instructions and then quit.
+usage () {
 	printf '\n%s\n\n' "Usage: $(basename "$0") [file]"
 	exit
+}
+
+# If the script isn't run with sudo / root privileges, quit.
+if [[ $EUID -ne 0 ]]; then
+	printf '\n%s\n\n' 'You need to be root to run this script!'
+	exit
 fi
 
-reformat_comments () {
-	switch='0'
+# If argument is not a real file, print usage instructions and then
+# quit.
+if [[ ! -f $1 ]]; then
+	usage
+fi
 
-	if [[ $line =~ $regex1 && ! $line =~ $regex6 ]]; then
-		j="$i"
-		line_tmp="${lines[${j}]}"
+declare if limit tab date line_this line_next
+declare -a lines_in lines_out
+declare -A regex
 
-		while [[ $line_tmp =~ $regex1 ]]; do
-			mapfile -d' ' -t line_tmp_array < <(tr -d '\r\n' <<<"$line_tmp" | sed -E -e "s/${regex1}//" -e "s/${regex3}//" -e "s/${regex4}/ /g")
-			line_tmp_string="# ${line_tmp_array[@]}"
-			line_tmp_chars="${#line_tmp_string}"
+if=$(readlink -f "$1")
 
-			if [[ $line_tmp_chars -gt $limit ]]; then
-				switch='1'
-			fi
+regex[comment]='^[[:blank:]]*#+[[:blank:]]*'
+regex[blank1]='^[[:blank:]]+'
+regex[blank2]='[[:blank:]]+$'
+regex[blank3]='[[:blank:]]+'
+regex[tab]='^ {4}'
+regex[shebang]='^#!'
 
-			printf ' %s' "${line_tmp_array[@]}"
+limit=72
+tab=$(printf '\t')
 
-			j=$(( j + 1 ))
-			line_tmp="${lines[${j}]}"
-		done > "$of_tmp"
+# Reads the input file.
+mapfile -t lines_in < <(tr -d '\r' <"$if")
 
-		if [[ $switch -eq 1 ]]; then
-			i=$(( j - 1 ))
+# Creates a function, called 'next_line', which will shift the line
+# variables by 1 line.
+next_line () {
+	(( i += 1 ))
+	(( j = (i + 1) ))
 
-			mapfile -d' ' -t line_tmp_array < <(sed -E "s/${regex2}//" <"$of_tmp")
+	line_this="${lines_in[${i}]}"
+	line_next="${lines_in[${j}]}"
+}
 
-			string_tmp='#'
-			char_sum='1'
+# Creates a function, called 'if_shebang', which will check if the
+# current line is a shebang, and add an empty line after if needed.
+if_shebang () {
+	if [[ $line_this =~ ${regex[shebang]} ]]; then
+		lines_out+=("$line_this")
 
-			end=$(( ${#line_tmp_array[@]} - 1 ))
-
-			for (( k=0; k<${#line_tmp_array[@]}; k++ )); do
-				word="${#line_tmp_array[${k}]}"
-				word=$(( word + 1 ))
-
-				char_sum=$(( char_sum + word ))
-
-				if [[ $char_sum -le $limit ]]; then
-					string_tmp+=" ${line_tmp_array[${k}]}"
-				else
-					printf '%s\n' "$string_tmp" >> "$of"
-
-					string_tmp="# ${line_tmp_array[${k}]}"
-					char_sum=$(( 1 + word ))
-				fi
-
-				if [[ $k -eq $end ]]; then
-					printf '%s\n' "$string_tmp" >> "$of"
-				fi
-			done
+		if [[ -n $line_next ]]; then
+			lines_out+=('')
 		fi
+
+		next_line
 	fi
 }
 
-reformat_lines () {
-	unset -v tmp
+# Creates a function, called 'reformat_comments', which will reformat
+# comments if they're longer than the set limit.
+reformat_comments () {
+	declare start stop switch string chars word
+	declare -a words buffer
 
-	if [[ $line =~ $regex1 && ! $line =~ $regex6 ]]; then
-		line=$(sed -E -e "s/${regex1}/# /" -e "s/${regex4}/ /g" <<<"$line")
+	start="$i"
+
+	switch=0
+
+	if [[ ! $line_this =~ ${regex[comment]} ]]; then
+		lines_out+=("$line_this")
+
+		return
 	fi
 
-	while [[ $line =~ $regex5 ]]; do
-		line=$(sed -E "s/${regex5}//" <<<"$line")
-		tmp+="$tab"
+	while [[ $line_this =~ ${regex[comment]} ]]; do
+		mapfile -t words < <(sed -E -e "s/${regex[comment]}//" -e "s/${regex[blank2]}//" -e "s/${regex[blank3]}/\n/g" <<<"$line_this")
+		string="# ${words[@]}"
+		chars="${#string}"
+
+		if [[ $chars -gt $limit ]]; then
+			switch=1
+		fi
+
+		buffer+=("${words[@]}")
+
+		next_line
 	done
 
-	line="${tmp}${line}"
+	if [[ $switch -eq 0 ]]; then
+		(( stop = (i - start) ))
 
-	if [[ $line =~ $regex3 ]]; then
-		line=$(sed -E "s/${regex3}//" <<<"$line")
+		lines_out+=("${lines_in[@]:${start}:${stop}}")
 	fi
 
-	printf '%s\n' "$line" >> "$of"
+	if [[ $switch -eq 1 ]]; then
+		string='#'
+		chars=1
+
+		for (( k = 0; k < ${#buffer[@]}; k++ )); do
+			word="${buffer[${k}]}"
+
+			(( chars += (${#word} + 1) ))
+
+			if [[ $chars -le $limit ]]; then
+				string+=" ${word}"
+			else
+				lines_out+=("$string")
+
+				string="# ${word}"
+				(( chars = (${#word} + 2) ))
+			fi
+		done
+
+		lines_out+=("$string")
+	fi
+
+	(( i -= 1 ))
 }
 
-mkdir -p "$tmp_dn"
-touch "$of"
+# Creates a function, called 'reformat_lines', which will fix
+# indentation among other things.
+reformat_lines () {
+	declare indent
 
-mapfile -t lines <"$if"
+	if [[ $line_this =~ ${regex[comment]} ]]; then
+		line_this=$(sed -E -e "s/${regex[comment]}/# /" -e "s/${regex[blank3]}/ /g" <<<"$line_this")
+	fi
 
-for (( i=0; i<${#lines[@]}; i++ )); do
-	line="${lines[${i}]}"
-	j=$(( i - 1 ))
-	previous="${lines[${j}]}"
+	while [[ $line_this =~ ${regex[tab]} ]]; do
+		line_this=$(sed -E "s/${regex[tab]}//" <<<"$line_this")
+		indent+="$tab"
+	done
 
-	if [[ -z $line && -z $previous ]]; then
+	line_this="${indent}${line_this}"
+
+	if [[ $line_this =~ ${regex[blank2]} ]]; then
+		line_this=$(sed -E "s/${regex[blank2]}//" <<<"$line_this")
+	fi
+
+	lines_out+=("$line_this")
+}
+
+# Creates a function, called 'reset_arrays', which will reset the line
+# arrays in-between loops.
+reset_arrays () {
+	lines_in=("${lines_out[@]}")
+	lines_out=()
+}
+
+for (( i = 0; i < ${#lines_in[@]}; i++ )); do
+	(( j = (i + 1) ))
+
+	line_this="${lines_in[${i}]}"
+	line_next="${lines_in[${j}]}"
+
+	if_shebang
+
+	if [[ -z $line_this && -z $line_next ]]; then
 		continue
 	fi
 
 	reformat_comments
-
-	if [[ $switch -eq 1 ]]; then
-		continue
-	else
-		reformat_lines
-	fi
 done
 
-chmod --reference="${if}" "$of"
-chown --reference="${if}" "$of"
-touch -r "$if" "$of"
+reset_arrays
 
-mv "$of" "$if"
+for (( i = 0; i < ${#lines_in[@]}; i++ )); do
+	(( j = (i + 1) ))
 
-rm -rf "$tmp_dn"
+	line_this="${lines_in[${i}]}"
+	line_next="${lines_in[${j}]}"
+
+	if_shebang
+
+	reformat_lines
+done
+
+# If the last line is not empty, add an empty line.
+#if [[ -n ${lines_out[-1]} ]]; then
+#	lines_out+=('')
+#fi
+
+# Gets the modification time of the input file.
+date=$(date -R -r "$if")
+
+# Truncates the input file.
+truncate -s 0 "$if"
+
+# Prints the altered lines to the input file.
+printf '%s\n' "${lines_out[@]}" > "$if"
+
+# Copies the original modification time to the changed file.
+touch -d "$date" "$if"

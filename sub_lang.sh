@@ -1,30 +1,33 @@
 #!/bin/bash
 
-# This script echoes all the subtitle languages of an MKV file
+# This script prints all the subtitle languages of an MKV file
 # in a comma-separated list. The MKV file should be given as the 1st
 # argument to this script.
 
-if=$(readlink -f "$1")
-if_bn=$(basename "$if")
-if_bn_lc="${if_bn,,}"
+declare switch line
+declare -a mkvinfo_tracks mkvinfo_lines lang_list
+declare -A if regex tracks
 
-declare -a mkvinfo_tracks
-declare -A tracks
+if[fn]=$(readlink -f "$1")
+if[bn]=$(basename "${if[fn]}")
+if[bn_lc]="${if[bn],,}"
 
-regex_start='^\|\+ Tracks$'
-regex_stop='^\|\+ '
-regex_strip='^\| +\+ (.*)$'
-regex_track="^Track$"
-regex_sub="^Track type: subtitles$"
-regex_lang="^Language( \(.*\)){0,1}: (.*)$"
-regex_name="^Name: (.*)$"
+regex[start]='^\|\+ Tracks$'
+regex[stop]='^\|\+ '
+regex[strip]='^\| +\+ (.*)$'
+regex[track]='^Track$'
+regex[sub]='^Track type: subtitles$'
+regex[lang]='^Language( \(.*\)){0,1}: (.*)$'
+regex[name]='^Name: (.*)$'
 
+# Creates a function, called 'usage', which will print usage
+# instructions and then quit.
 usage () {
 	printf '\n%s\n\n' "Usage: $(basename "$0") [mkv]"
 	exit
 }
 
-if [[ ! -f $if || ${if_bn_lc##*.} != 'mkv' ]]; then
+if [[ ! -f ${if[fn]} || ${if[bn_lc]##*.} != 'mkv' ]]; then
 	usage
 fi
 
@@ -35,7 +38,7 @@ if [[ $? -ne 0 ]]; then
 	exit
 fi
 
-mapfile -t mkvinfo_lines < <(mkvinfo "$if" 2>&-)
+mapfile -t mkvinfo_lines < <(mkvinfo "${if[fn]}" 2>&-)
 
 # Singles out the part that lists the tracks, and ignores the rest of
 # the output from 'mkvinfo'.
@@ -44,23 +47,25 @@ switch=0
 for (( i = 0; i < ${#mkvinfo_lines[@]}; i++ )); do
 	line="${mkvinfo_lines[${i}]}"
 
-	if [[ $line =~ $regex_start ]]; then
+	if [[ $line =~ ${regex[start]} ]]; then
 		switch=1
 		continue
 	fi
 
-	if [[ $switch -eq 1 ]]; then
-		if [[ $line =~ $regex_stop ]]; then
-			switch=0
-			break
-		fi
-
-		if [[ $line =~ $regex_strip ]]; then
-			line="${BASH_REMATCH[1]}"
-		fi
-
-		mkvinfo_tracks+=("$line")
+	if [[ $switch -eq 0 ]]; then
+		continue
 	fi
+
+	if [[ $line =~ ${regex[stop]} ]]; then
+		switch=0
+		break
+	fi
+
+	if [[ $line =~ ${regex[strip]} ]]; then
+		line="${BASH_REMATCH[1]}"
+	fi
+
+	mkvinfo_tracks+=("$line")
 done
 
 unset -v mkvinfo_lines
@@ -71,46 +76,52 @@ declare n
 for (( i = 0; i < ${#mkvinfo_tracks[@]}; i++ )); do
 	line="${mkvinfo_tracks[${i}]}"
 
-	if [[ $line =~ $regex_track ]]; then
+	if [[ $line =~ ${regex[track]} ]]; then
 		if [[ -z $n ]]; then
 			n=0
 		else
-			n=$(( n + 1 ))
+			(( n += 1 ))
 		fi
 
 		tracks["${n},sub"]=0
 	fi
 
-	if [[ $line =~ $regex_sub ]]; then
+	if [[ $line =~ ${regex[sub]} ]]; then
 		tracks["${n},sub"]=1
 	fi
 
 # For some tracks, the language can be listed twice. First with a
 # three-letter code, and then with a two-letter code. The first code is
 # preferred by this script.
-	if [[ $line =~ $regex_lang ]]; then
+	if [[ $line =~ ${regex[lang]} ]]; then
 		if [[ -z ${tracks[${n},lang]} ]]; then
-			tracks["${n},lang"]="${BASH_REMATCH[2]}"
+			tracks["${n},lang"]="${BASH_REMATCH[2],,}"
 		fi
 	fi
 
-	if [[ $line =~ $regex_name ]]; then
-		tracks["${n},name"]="${BASH_REMATCH[1]}"
+	if [[ $line =~ ${regex[name]} ]]; then
+		if [[ -z ${tracks[${n},name]} ]]; then
+			tracks["${n},name"]="${BASH_REMATCH[1]}"
+		fi
 	fi
 done
 
-n=$(( n + 1 ))
+(( n += 1 ))
 
 unset -v mkvinfo_tracks
 
+# Creates a function, called 'sort_list', which will sort any subtitle
+# tracks it finds in alphabetical order, and remove duplicates.
 sort_list () {
 	for (( i = 0; i < n; i++ )); do
-		if [[ ${tracks[${i},sub]} -eq 1 ]]; then
-			if [[ -n ${tracks[${i},lang]} ]]; then
-				printf '%s\n' "${tracks[${i},lang]}"
-			elif [[ -n ${tracks[${i},name]} ]]; then
-				printf '%s\n' "${tracks[${i},name]}"
-			fi
+		if [[ ${tracks[${i},sub]} -ne 1 ]]; then
+			continue
+		fi
+
+		if [[ -n ${tracks[${i},lang]} ]]; then
+			printf '%s\n' "${tracks[${i},lang]}"
+		elif [[ -n ${tracks[${i},name]} ]]; then
+			printf '%s\n' "${tracks[${i},name]}"
 		fi
 	done | sort -u
 }
@@ -133,4 +144,4 @@ for (( i = 0; i < ${#lang_list[@]}; i++ )); do
 	fi
 done
 
-printf '\n' 
+printf '\n'

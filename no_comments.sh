@@ -3,15 +3,25 @@
 # This script is just meant to read script files, but without the
 # comments.
 
-if=$(readlink -f "$1")
-
-if [[ ! -f $if ]]; then
+# Creates a function, called 'usage', which will print usage
+# instructions and then quit.
+usage () {
 	printf '\n%s\n\n' "Usage: $(basename "$0") [file]"
 	exit
+}
+
+if [[ ! -f $1 ]]; then
+	usage
 fi
 
-regex='^([[:space:]]*)(#+)'
+declare if
+declare -a lines
+declare -A regex
 
-mapfile -t lines < <(grep -Ev "$regex" "$if")
+if=$(readlink -f "$1")
+
+regex[comment]='^[[:blank:]]*#+'
+
+mapfile -t lines < <(tr -d '\r' <"$if" | grep -Ev "${regex[comment]}")
 
 printf '%s\n' "${lines[@]}"
